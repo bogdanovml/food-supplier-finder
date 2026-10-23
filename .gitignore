@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Secrets — НИКОГДА в репозиторий
+.env
+*.local.env
+
+# Data
+data/*.db
+data/*.sqlite*
+exports/
+*.log
+
+# OS / editor
+.DS_Store
+._*
+.idea/
+.vscode/
