@@ -7,21 +7,25 @@
   {"type": "done", "search_id": N, "count": N, "stats": {...}}
   {"type": "error",  "message": "..."}
 
-Источник阶段 параллельны: SERP + optlist + gosplan стартуют одновременно —
-пользователь видит три полосы прогресса, а не последовательное ожидание."""
+Этапы источников параллельны: SERP + optlist + gosplan стартуют вместе —
+пользователь видит три полосы прогресса, а не последовательное ожидание.
+
+На финише карточки сливаются в ГЛОБАЛЬНЫЙ реестр поставщиков: один
+поставщик может поставлять много товаров — база копится между поисками."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncIterator, Callable
+from typing import Any, Callable
 
 from . import db
 from .config import get_settings
 from .extraction import enrich_sites
 from .llm import ask_json, LLMError
 from .merge import merge_all, apply_enrichment
+from .okpd import suggest_codes, validate_codes
 from .regions import resolve
 from .sources import gosplan as gosplan_src
 from .sources import optlist as optlist_src
@@ -35,22 +39,39 @@ Emit = Callable[[Event], None]
 STAGES = ["plan", "serp", "optlist", "gosplan", "merge", "enrich", "structure", "done"]
 
 
-async def _plan_queries(query: str, emit: Emit) -> list[str]:
-    """LLM строит 2-3 поисковых запроса из пользовательского ТЗ (дешёвая модель)."""
+async def _plan_queries(query: str, emit: Emit) -> tuple[list[str], list[str]]:
+    """LLM строит поисковые запросы + предлагает ОКПД2-коды категории товара.
+
+    Коды валидируются по справочнику (анти-галлюцинация) и дополняются
+    fuzzy-матчингом названия по справочнику.
+    """
     await emit({"type": "stage", "stage": "plan", "status": "start"})
+    queries: list[str] = []
+    codes_raw: list[str] = []
     try:
         data = await ask_json(
-            f'Товар: "{query}". Составь 2-3 поисковых запроса для Яндекса, '
-            f'чтобы найти ОПТОВЫХ поставщиков/производителей этого товара в России. '
-            f'Ответь JSON: {{"queries": ["...", "...", "..."]}}',
-            smart=False, temperature=0.3, max_tokens=300)
-        queries = [q for q in data.get("queries", []) if isinstance(q, str) and len(q) > 3]
+            f'Товар: "{query}". '
+            f'1) Составь 2-3 поисковых запроса для Яндекса, чтобы найти ОПТОВЫХ '
+            f'поставщиков/производителей этого товара в России. '
+            f'2) Назови 1-3 кода ОКПД2 (российский классификатор продукции), '
+            f'к которым относится этот товар (например, мука -> 10.61.21). '
+            f'Ответь JSON: {{"queries": ["..."], "okpd2": ["10.xx.xx"]}}',
+            smart=True, temperature=0.2, max_tokens=400)
+        queries = [q for q in data.get("queries", []) if isinstance(q, str) and len(q) > 3][:3]
+        codes_raw = [str(c).strip() for c in data.get("okpd2", []) if c][:3]
     except LLMError:
-        queries = []
-    queries = queries[:3] or [f"{query} оптом", f"{query} производитель купить"]
-    await emit({"type": "stage", "stage": "plan", "status": "done",
-                "found": len(queries), "message": f"Запросы: {'; '.join(queries)}"})
-    return queries
+        pass
+    queries = queries or [f"{query} оптом", f"{query} производитель купить"]
+
+    codes = validate_codes(codes_raw)
+    for c, _n in suggest_codes(query, limit=2):
+        if c not in codes:
+            codes.append(c)
+    codes = codes[:3]
+
+    await emit({"type": "stage", "stage": "plan", "status": "done", "found": len(queries),
+                "message": f"Запросы: {'; '.join(queries)}. ОКПД2: {', '.join(codes) or '—'}"})
+    return queries, codes
 
 
 async def _run_serp(queries: list[str], lr: int, emit: Emit) -> list:
@@ -83,13 +104,21 @@ async def _run_optlist(query: str, emit: Emit) -> list:
         return []
 
 
-async def _run_gosplan(query: str, region_code: int, emit: Emit) -> list:
+async def _run_gosplan(query: str, region_code: int, classifiers: list[str],
+                       emit: Emit) -> list:
     await emit({"type": "stage", "stage": "gosplan", "status": "start",
-                "message": "44-ФЗ: исполненные контракты (Госплан API)"})
+                "message": f"44-ФЗ: контракты по товару + ОКПД2 "
+                           f"({', '.join(classifiers) if classifiers else 'полный текст'})"})
     try:
-        hits = await gosplan_src.search_food_contracts(query, region_code=region_code or None)
-        await emit({"type": "stage", "stage": "gosplan", "status": "done", "found": len(hits)})
-        return hits
+        sup = await gosplan_src.search_gov_suppliers(
+            query, region_code=region_code or None,
+            classifiers=classifiers or None, limit=20, max_details=10)
+        contracts_total = sum(g.count for g in sup)
+        await emit({"type": "stage", "stage": "gosplan", "status": "done",
+                    "found": len(sup),
+                    "message": f"{len(sup)} поставщиков, {contracts_total} контрактов "
+                               f"на {sum(g.total_value for g in sup):,.0f} ₽"})
+        return sup
     except Exception as exc:
         logger.warning("gosplan stage failed: %s", exc)
         await emit({"type": "stage", "stage": "gosplan", "status": "skipped",
@@ -98,51 +127,70 @@ async def _run_gosplan(query: str, region_code: int, emit: Emit) -> list:
 
 
 async def _structure_reasons(cards: list, query: str, emit: Emit) -> None:
-    """LLM: человеческие «причины связаться» (одна batched-вызов — быстро и дёшево)."""
+    """LLM: «почему связаться» — строго по фактам, без пересказа описаний."""
     await emit({"type": "stage", "stage": "structure", "status": "start"})
     top = sorted(cards, key=lambda c: c.relevance, reverse=True)[:12]
     if not top:
         await emit({"type": "stage", "stage": "structure", "status": "skipped"})
         return
     compact = [{"i": i, "name": c.name, "city": c.city,
-                 "contracts": c.gov_contracts_count, "value": c.gov_contracts_value,
-                 "min_order": c.min_order, "desc": (c.description or "")[:120]}
+                "contracts": c.gov_contracts_count,
+                "value": c.gov_contracts_value,
+                "contract_example": (c.gov_contract_examples or [{}])[0].get("subject", "")[:80],
+                "min_order": c.min_order, "price_note": (c.price_note or "")[:80],
+                "certificates": "; ".join(c.certificates[:3]),
+                "has_email": bool(c.emails), "docs": c.docs_verified}
                 for i, c in enumerate(top)]
     try:
         data = await ask_json(
-            f'Пользователь ищет поставщиков: "{query}". Ниже — список поставщиков (JSON). '
-            f"Для КАЖДОГО верни одну краткую причину, почему с ним стоит связаться "
-            f"(из его данных, без общих слов). Ответь JSON: "
-            f'{{"reasons": [{{"i": 0, "why": "..."}}, ...]}}\n\n{json.dumps(compact, ensure_ascii=False)}',
-            smart=True, temperature=0.4, max_tokens=1200)
+            f'Пользователь ищет поставщиков: "{query}". Ниже — JSON поставщиков с их '
+            f"подтверждёнными фактами (контракты 44-ФЗ, цены, МОК, сертификаты, контакты).\n\n"
+            f"Для КАЖДОГО поставщика сформулируй ОДНУ причину связаться, опираясь ТОЛЬКО на "
+            f"факты из данных (цифры контрактов, цены, МОК, сертификаты, документы). "
+            f"НЕ описывай компанию, объясни закупщику конкретную выгоду. Если фактов нет — "
+            f"прямо скажи, что данные не подтверждены и нужна ручная проверка.\n\n"
+            f'Ответь JSON: {{"reasons": [{{"i": 0, "why": "..."}}, ...]}}\n\n'
+            f"{json.dumps(compact, ensure_ascii=False)}",
+            smart=True, temperature=0.3, max_tokens=1400)
         for r in data.get("reasons", []):
             try:
                 card = top[int(r.get("i", -1))]
                 why = str(r.get("why", "")).strip()
                 if why:
-                    card.reasons.append(why[:200])
+                    card.reasons.append(why[:250])
             except (ValueError, IndexError):
                 continue
     except (LLMError, ValueError) as exc:
         logger.warning("structure stage failed: %s", exc)
         for c in top:
             c.reasons.append(_fallback_reason(c))
+    # fallback для тех, кому LLM не дал причину
+    for c in top:
+        if not c.reasons:
+            c.reasons.append(_fallback_reason(c))
     await emit({"type": "stage", "stage": "structure", "status": "done", "found": len(top)})
 
 
 def _fallback_reason(card) -> str:
     if card.gov_contracts_count:
-        return (f"Поставлял госзаказчикам ({card.gov_contracts_count} контракт(ов) "
-                f"на {card.gov_contracts_value:,.0f} ₽)")
+        ex = (card.gov_contract_examples or [{}])[0]
+        subj = (ex.get("subject") or "продукцию")[:60]
+        return (f"Подтверждённый поставщик госзаказчиков: {card.gov_contracts_count} "
+                f"контракт(ов) на {card.gov_contracts_value:,.0f} ₽, включая «{subj}»")
+    if card.price_min:
+        note = card.price_note[:80]
+        return f"Есть ценовой ориентир: {note} — можно сравнивать до запроса КП"
     if card.min_order:
-        return f"Оптовый поставщик, мин. заказ {card.min_order}"
+        return f"Известен минимальный заказ: {card.min_order} — сразу видно, подходит ли объём"
+    if card.docs_verified or card.certificates:
+        return "Документы проверены каталогом, есть сертификаты — ниже риск по качеству"
     if card.emails:
-        return "Есть прямые контакты для запроса КП"
-    return "Найден по профильному запросу в органике"
+        return "Есть прямой email — быстрый канал запроса КП"
+    return "Данные не подтверждены (органика): нужен ручный звонок до запроса КП"
 
 
-async def run_search(query: str, region_name: str, emit: Emit) -> AsyncIterator[None]:
-    """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков."""
+async def run_search(query: str, region_name: str, emit: Emit) -> None:
+    """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков + реестр."""
     s = get_settings()
     lr, gos_region = resolve(region_name)
     search_id = db.create_search(query, region_name, lr)
@@ -150,22 +198,22 @@ async def run_search(query: str, region_name: str, emit: Emit) -> AsyncIterator[
     t0 = time.monotonic()
 
     try:
-        queries = await _plan_queries(query, emit)
+        queries, codes = await _plan_queries(query, emit)
 
         await emit({"type": "stage", "stage": "merge", "status": "pending"})
         # три источника параллельно
-        serp_hits, opt_hits, gos_hits = await asyncio.gather(
+        serp_hits, opt_hits, gov_sup = await asyncio.gather(
             _run_serp(queries, lr, emit),
             _run_optlist(query, emit),
-            _run_gosplan(query, gos_region, emit),
+            _run_gosplan(query, gos_region, codes, emit),
         )
         stats["serp"] = len(serp_hits)
         stats["optlist"] = len(opt_hits)
-        stats["gosplan"] = len(gos_hits)
+        stats["gosplan"] = len(gov_sup)
 
         # --- merge ---
         await emit({"type": "stage", "stage": "merge", "status": "start"})
-        cards = merge_all(serp_hits, opt_hits, gos_hits, region_name)
+        cards = merge_all(serp_hits, opt_hits, gov_sup, region_name)
         await emit({"type": "stage", "stage": "merge", "status": "done", "found": len(cards)})
 
         # карточки сразу в UI (enrichment_status=pending)
@@ -204,11 +252,19 @@ async def run_search(query: str, region_name: str, emit: Emit) -> AsyncIterator[
         for c in final:
             await emit({"type": "supplier", "data": _row(c)})
 
-        # --- запись в БД ---
-        ids = [db.insert_supplier({"search_id": search_id, **_row(c)}) for c in final]
+        # --- запись в БД + глобальный реестр ---
+        for c in final:
+            row = {"search_id": search_id, **_row(c)}
+            db.insert_supplier(row)
+            try:
+                db.upsert_registry(row, query)
+            except Exception as exc:
+                logger.warning("registry upsert failed for %s: %s", c.name, exc)
+
         stats["suppliers"] = len(final)
         stats["with_contacts"] = sum(1 for c in final if c.emails or c.phones)
         stats["with_prices"] = sum(1 for c in final if c.price_min or c.gov_contracts_value)
+        stats["with_gov"] = sum(1 for c in final if c.gov_contracts_count)
         stats["seconds"] = round(time.monotonic() - t0, 1)
         db.finish_search(search_id, "done", stats)
         await emit({"type": "done", "search_id": search_id,

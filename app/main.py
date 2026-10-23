@@ -111,6 +111,18 @@ async def api_searches():
     return db.list_searches()
 
 
+@app.get("/api/registry")
+async def api_registry():
+    """Глобальная база поставщиков: накапливается по всем поискам,
+    у одного поставщика может быть много товаров."""
+    return {"stats": db.registry_stats(), "suppliers": db.list_registry()}
+
+
+@app.get("/api/registry/stats")
+async def api_registry_stats():
+    return db.registry_stats()
+
+
 @app.get("/api/searches/{search_id}/suppliers")
 async def api_suppliers(search_id: int):
     return db.get_suppliers(search_id)

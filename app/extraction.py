@@ -157,7 +157,10 @@ def regex_facts(url: str, text: str) -> SiteFacts:
 
 
 async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
-    """LLM-слой: понимает контекст, отсекает нерелевантные страницы."""
+    """LLM-слой: понимает контекст, отсекает нерелевантные страницы.
+
+    Ключевое отличие от regex: цены извлекаются ТОЛЬКО по предмету запроса
+    (запрос «чипсы» -> «чипсы картофельные 43 ₽/шт»), а не любые ₽ на странице."""
     f = SiteFacts(url=url, method="llm")
     prompt = f"""Товар, который ищет пользователь: "{query}".
 Ниже — текст с сайта потенциального поставщика. Определи, торгует ли сайт этим
@@ -167,11 +170,14 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
 {{"relevant": true/false,
   "supplier_kind": "производитель|дистрибьютор|магазин|неясно",
   "description": "1-2 предложения, чем занимается компания",
-  "price_examples": ["строки с ценами как на сайте, если видны"],
+  "price_examples": ["цены ТОЛЬКО на искомый товар, в формате как на сайте: '43 руб/шт', 'от 850 руб за кг'"],
   "min_order": "мин. заказ/партия если указан, иначе null",
   "delivery": "условия доставки если указаны, иначе null",
   "certificates": ["найденные сертификаты/ГОСТы"],
   "phones": ["телефоны"], "emails": ["email"]}}
+
+ВАЖНО: в price_examples включай цены только на "{query}" или его прямые
+варианты. Цены на другие товары, услуги, доставку — НЕ включай.
 
 Текст сайта (обрезан):
 {text[:HTML_TRIM]}"""
@@ -217,19 +223,42 @@ def merge_facts(a: SiteFacts, b: SiteFacts) -> SiteFacts:
 
 
 async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFacts:
-    """Полный enrichment одного сайта: fetch -> regex -> (LLM если надо)."""
+    """Полный enrichment одного сайта: fetch -> regex -> LLM (цены по предмету).
+
+    Если на странице нет email — пробуем типовые страницы контактов
+    (/kontakty, /contacts, /o-kompanii): там контакты в 90% случаев."""
     html = await fetch_html(url)
     if not html:
         return SiteFacts(url=url, method="failed")
     full_text = _text_of(html)
     facts = regex_facts(url, full_text)
-    # LLM нужен если: ничего не извлекли regex-ом ИЛИ страница мелкая/сложная,
-    # или нет описания. Иначе не тратим дорогие вызовы.
-    needs_llm = use_llm and (not facts.prices and not facts.min_order or not facts.emails)
-    if needs_llm and len(full_text) > 200:
+
+    # нет email -> вторая попытка со страницей контактов
+    if not facts.emails:
+        for suffix in ("kontakty", "contacts", "kontakty.html"):
+            contact_html = await fetch_html(url.rstrip("/") + "/" + suffix)
+            if not contact_html:
+                continue
+            contact_facts = regex_facts(url + "/" + suffix, _text_of(contact_html))
+            for e in contact_facts.emails:
+                if e not in facts.emails:
+                    facts.emails.append(e)
+            for p in contact_facts.phones:
+                if p not in facts.phones:
+                    facts.phones.append(p)
+            if facts.emails:
+                facts.ok = True
+                break
+
+    # LLM: цены строго по предмету запроса (главный источник цен),
+    # плюс описание/МОК/сертификаты которые regex не видит
+    if use_llm and len(_text_of(html)) > 200:
         llm = await llm_facts(url, _main_text(html), query)
         if llm.ok:
             facts = merge_facts(facts, llm)
+            # цены LLM релевантнее regex-мусора с навигации: приоритет LLM
+            if llm.prices:
+                facts.prices = llm.prices
     return facts
 
 

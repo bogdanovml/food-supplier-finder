@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
     certificates TEXT,
     gov_contracts_count INTEGER DEFAULT 0,
     gov_contracts_value REAL DEFAULT 0,
+    gov_contract_examples TEXT,
     relevance INTEGER DEFAULT 0,
     reasons TEXT,
     sources TEXT,
@@ -57,6 +58,32 @@ CREATE TABLE IF NOT EXISTS notes (
     supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
     text TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS registry (
+    key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    inn TEXT,
+    domain TEXT,
+    city TEXT,
+    region TEXT,
+    emails TEXT,
+    phones TEXT,
+    site TEXT,
+    min_order TEXT,
+    certificates TEXT,
+    gov_contracts_count INTEGER DEFAULT 0,
+    gov_contracts_value REAL DEFAULT 0,
+    searches_count INTEGER DEFAULT 1,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS registry_products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    registry_key TEXT NOT NULL REFERENCES registry(key),
+    query TEXT NOT NULL,
+    category TEXT,
+    seen_at TEXT NOT NULL,
+    UNIQUE (registry_key, query)
 );
 CREATE TABLE IF NOT EXISTS rfq_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +112,11 @@ def _conn() -> sqlite3.Connection:
         conn.executescript(SCHEMA)
         try:
             conn.execute("ALTER TABLE suppliers ADD COLUMN status TEXT DEFAULT 'new'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE suppliers ADD COLUMN gov_contract_examples TEXT")
             conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -156,7 +188,7 @@ SUPPLIER_COLS = [
     "search_id", "name", "domain", "inn", "city", "region", "phones", "emails",
     "site", "description", "categories", "price_min", "price_max", "price_note",
     "min_order", "delivery", "certificates", "gov_contracts_count",
-    "gov_contracts_value", "relevance", "reasons", "sources",
+    "gov_contracts_value", "gov_contract_examples", "relevance", "reasons", "sources",
     "enrichment_status", "status",
 ]
 
@@ -165,7 +197,7 @@ def insert_supplier(data: dict) -> int:
     payload = {k: data.get(k) for k in SUPPLIER_COLS}
     if not payload.get("status"):
         payload["status"] = "new"
-    for k in ("phones", "emails", "categories", "certificates", "reasons", "sources"):
+    for k in ("phones", "emails", "categories", "certificates", "reasons", "sources", "gov_contract_examples"):
         payload[k] = _j(payload[k]) if payload[k] is not None else None
     cols = ", ".join(SUPPLIER_COLS)
     ph = ", ".join("?" * len(SUPPLIER_COLS))
@@ -241,3 +273,88 @@ def log_rfq(search_id: int, supplier_ids: list[int], subject: str, body: str, st
         )
         c.commit()
         return cur.lastrowid
+
+
+# ------------------------------ реестр поставщиков (глобальная база) ------------------------------
+
+def _registry_key(s: dict) -> str:
+    """Ключ глобального реестра: ИНН надёжнее, иначе домен, иначе имя."""
+    return f"inn:{s['inn']}" if s.get("inn") else (f"dom:{s['domain']}" if s.get("domain") else f"name:{s.get('name','').lower()}")
+
+
+def upsert_registry(supplier: dict, query: str) -> None:
+    """Идемпотентное слияние карточки поиска в глобальный реестр.
+
+    Один поставщик может поставлять сколько угодно видов товаров:
+    каждый поиск дописывает товар в registry_products и освежает факты.
+    """
+    key = _registry_key(supplier)
+    now = _now()
+    with db() as c:
+        row = c.execute("SELECT * FROM registry WHERE key=?", (key,)).fetchone()
+        if row is None:
+            c.execute(
+                "INSERT INTO registry (key, name, inn, domain, city, region, emails, phones, "
+                "site, min_order, certificates, gov_contracts_count, gov_contracts_value, "
+                "searches_count, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
+                (key, supplier["name"], supplier.get("inn"), supplier.get("domain"),
+                 supplier.get("city"), supplier.get("region"),
+                 _j(supplier.get("emails") or []), _j(supplier.get("phones") or []),
+                 supplier.get("site"), supplier.get("min_order"),
+                 _j(supplier.get("certificates") or []),
+                 supplier.get("gov_contracts_count") or 0,
+                 supplier.get("gov_contracts_value") or 0, now, now),
+            )
+        else:
+            # не перезаписываем заполненное пустым; копим контрактную статистику
+            def coalesce(old, new):
+                return new if new not in (None, "", []) else old
+            c.execute(
+                "UPDATE registry SET name=?, emails=COALESCE(NULLIF(?,'null'), emails), "
+                "phones=COALESCE(NULLIF(?,'null'), phones), min_order=?, "
+                "certificates=COALESCE(NULLIF(?,'null'), certificates), "
+                "gov_contracts_count=MAX(gov_contracts_count, ?), "
+                "gov_contracts_value=MAX(gov_contracts_value, ?), "
+                "searches_count=searches_count+1, last_seen=? WHERE key=?",
+                (supplier["name"],
+                 _j(supplier.get("emails") or []) or "null",
+                 _j(supplier.get("phones") or []) or "null",
+                 coalesce(row["min_order"], supplier.get("min_order")),
+                 _j(supplier.get("certificates") or []) or "null",
+                 supplier.get("gov_contracts_count") or 0,
+                 supplier.get("gov_contracts_value") or 0, now, key),
+            )
+        try:
+            c.execute("INSERT INTO registry_products (registry_key, query, seen_at) VALUES (?,?,?)",
+                      (key, query, now))
+        except sqlite3.IntegrityError:
+            pass  # UNIQUE (registry_key, query) — уже знаем, что он это поставляет
+        c.commit()
+
+
+def list_registry(limit: int = 500) -> list[dict]:
+    """Реестр с агрегированными товарами: один поставщик -> список категорий."""
+    with db() as c:
+        rows = c.execute(
+            "SELECT r.*, GROUP_CONCAT(DISTINCT rp.query, ' | ') AS products "
+            "FROM registry r LEFT JOIN registry_products rp ON rp.registry_key = r.key "
+            "GROUP BY r.key "
+            "ORDER BY r.gov_contracts_value DESC, r.searches_count DESC, r.last_seen DESC "
+            "LIMIT ?", (limit,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("emails", "phones", "certificates"):
+                d[k] = _uj(d.get(k), [])
+            d["products"] = [p.strip() for p in (d.get("products") or "").split("|") if p.strip()]
+            out.append(d)
+        return out
+
+
+def registry_stats() -> dict:
+    with db() as c:
+        n_sup = c.execute("SELECT COUNT(*) FROM registry").fetchone()[0]
+        n_prod = c.execute("SELECT COUNT(DISTINCT query) FROM registry_products").fetchone()[0]
+        n_links = c.execute("SELECT COUNT(*) FROM registry_products").fetchone()[0]
+        return {"suppliers": n_sup, "product_queries": n_prod, "links": n_links}

@@ -88,6 +88,7 @@ function setupEventListeners() {
   document.getElementById("rfq-regen-btn").addEventListener("click", regenerateRfq);
   document.getElementById("rfq-send-btn").addEventListener("click", dispatchRfqSmtp);
   document.getElementById("rfq-mailto-btn").addEventListener("click", dispatchRfqMailto);
+  document.getElementById("btn-registry").addEventListener("click", openRegistry);
 
   // Filter pills
   document.querySelectorAll("#filter-pills button").forEach(btn => {
@@ -392,6 +393,21 @@ function buildTable() {
         width: 95,
         headerSort: false,
         formatter: (c) => c.getValue() ? `<span class="badge bg-light text-dark border">${escapeHtml(c.getValue())}</span>` : '<span class="text-muted">—</span>'
+      },
+      {
+        title: "Цена по запросу",
+        field: "price_note",
+        widthGrow: 1.6,
+        minWidth: 150,
+        headerSort: false,
+        formatter: (cell) => {
+          const d = cell.getData();
+          const note = d.price_note || (d.price_min ? `от ${d.price_min} ₽` : "");
+          if (!note) return '<span class="text-muted small">По запросу КП</span>';
+          const isGov = (d.price_note || "").startsWith("контракты:");
+          const title = isGov ? "Фактические цены исполненных госконтрактов (44-ФЗ)" : "Цены с сайта поставщика по предмету запроса";
+          return `<div class="text-truncate" style="font-size:12px" title="${escapeHtml(title)}: ${escapeHtml(note)}">${isGov ? '<span class="text-success">' : ''}${escapeHtml(note.slice(0, 90))}${isGov ? '</span>' : ''}</div>`;
+        }
       },
       {
         title: "Опыт 44-ФЗ",
@@ -945,3 +961,59 @@ function showToast(msg) {
 
 // Start application on load
 document.addEventListener("DOMContentLoaded", init);
+
+/* --------------------------------------------------------------------------
+   Global Supplier Registry (накопительная база поставщиков)
+   -------------------------------------------------------------------------- */
+let registryTable = null;
+
+async function openRegistry() {
+  try {
+    const res = await fetch("/api/registry");
+    const data = await res.json();
+    document.getElementById("registry-stats").innerHTML = `
+      <div class="d-flex gap-3 mb-2 small text-muted">
+        <span>Поставщиков в базе: <strong class="text-dark">${data.stats.suppliers}</strong></span>
+        <span>Категорий товаров: <strong class="text-dark">${data.stats.product_queries}</strong></span>
+        <span>Связей поставщик-товар: <strong class="text-dark">${data.stats.links}</strong></span>
+      </div>
+    `;
+    if (!registryTable) {
+      registryTable = new Tabulator("#registry-table", {
+        layout: "fitColumns",
+        height: "65vh",
+        pagination: "local",
+        paginationSize: 20,
+        placeholder: "База пуста — выполните первый поиск, поставщики накопятся автоматически.",
+        columns: [
+          { title: "Поставщик", field: "name", widthGrow: 1.8, formatter: (cell) => {
+              const d = cell.getData();
+              const inn = d.inn ? ` <span class="text-muted small">(${escapeHtml(d.inn)})</span>` : "";
+              return `<div class="fw-semibold">${escapeHtml(d.name)}${inn}</div>`;
+            } },
+          { title: "Город", field: "city", width: 110, formatter: (c) => escapeHtml(c.getValue() || "—") },
+          { title: "Товары / категории", field: "products", widthGrow: 2, formatter: (cell) => {
+              const arr = cell.getValue() || [];
+              return arr.length ? `<div class="small">${arr.map(escapeHtml).join(", ")}</div>` : '<span class="text-muted">—</span>';
+            } },
+          { title: "Контракты 44-ФЗ", field: "gov_contracts_count", width: 120, hozAlign: "center", sorter: "number", formatter: (cell) => {
+              const d = cell.getData();
+              if (!d.gov_contracts_count) return '<span class="text-muted">—</span>';
+              return `<div class="fw-bold text-success">${d.gov_contracts_count} шт<div class="small text-muted" style="font-weight:400">${(d.gov_contracts_value/1_000_000).toFixed(1)} млн ₽</div></div>`;
+            } },
+          { title: "Email", field: "emails", widthGrow: 1.2, formatter: (cell) => {
+              const arr = cell.getValue() || [];
+              return arr.length ? `<a href="mailto:${escapeHtml(arr[0])}">${escapeHtml(arr[0])}</a>` : '<span class="text-muted">—</span>';
+            } },
+          { title: "Поисков", field: "searches_count", width: 90, hozAlign: "center", sorter: "number",
+            formatter: (c) => `<span class="badge bg-light text-dark border">${c.getValue()}</span>` },
+        ],
+        initialSort: [{ column: "gov_contracts_count", dir: "desc" }],
+      });
+    }
+    registryTable.setData(data.suppliers);
+    new bootstrap.Modal(document.getElementById("registry-modal")).show();
+  } catch (err) {
+    alert("Не удалось загрузить базу поставщиков: " + err.message);
+  }
+}

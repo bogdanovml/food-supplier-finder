@@ -3,29 +3,56 @@
 Ключи слияния (по убыванию надёжности):
   1. ИНН (госконтракт ↔ optlist) — точное совпадение;
   2. домен (SERP ↔ optlist site) — tldextract;
-  3. fuzzy-имя (rapidfuzz partial_ratio ≥ 93) — «ООО «РисОптТорг»» ≈ «РисОптТорг».
+  3. fuzzy-имя (rapidfuzz partial_ratio ≥ 93).
 
-Provenance: каждый атрибут хранит источник («цена ← госконтракт №…»),
-в UI это показывает пользователь, откуда что взято — прозрачность."""
+Санитария данных:
+  * DOMAIN_BLACKLIST — поисковики, маркетплейсы, агрегаторы и сам каталог
+    никогда не становятся «поставщиками» (в органике их полно);
+  * имена-заголовки типа «Купить чипсы оптом в СПб» заменяются доменом —
+    это честно: поисковик знает домен, а не юрлицо.
+
+Provenance: каждый атрибут хранит источник («цена ← госконтракт №…»)."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from rapidfuzz import fuzz
-import re
 import tldextract
+from rapidfuzz import fuzz
 
 from .extraction import normalize_price
-from .sources.gosplan import ContractHit
+from .sources.gosplan import GovSupplier
 from .sources.optlist import OptlistHit
 from .sources.xmlstock import SerpHit
 
 _tld = tldextract.TLDExtract(suffix_list_urls=())  # встроенный снапшот PSL — офлайн
 
+# Всё, что не может быть поставщиком: поисковики, маркетплейсы, агрегаторы,
+# отраслевые порталы-справочники, соцсети. Проверяется по регистрируемому домену.
+DOMAIN_BLACKLIST: set[str] = {
+    # поисковики/порталы
+    "yandex.ru", "ya.ru", "google.com", "google.ru", "bing.com", "mail.ru",
+    "list-org.com", "checko.ru", "rusprofile.ru", "sbis.ru", "kontur.ru",
+    "zakupki.gov.ru", "gosplan.info",
+    # маркетплейсы/объявления
+    "avito.ru", "ozon.ru", "wildberries.ru", "market.yandex.ru", "sbermegamarket.ru",
+    "allegro.ru", "ebay.com", "aliexpress.ru",
+    # b2b-агрегаторы и каталоги (они — витрины, не поставщики)
+    "optlist.ru", "tiu.ru", "pulscen.ru", "prom.ru", "all.biz", "satom.ru",
+    "fl.ru", "b2b-center.ru", "prodirectory.ru", "foodbay.com", "prodal.ru",
+    "suplfood.ru", "foods.ru", "mosex.name", "agrorus.com", "opt-union.ru",
+    "sakh.com", "bloha.ru", "tenderguru.ru", "sdelanogroup.ru",
+    # соцсети/видео/справка
+    "vk.com", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",
+    "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru",
+    # досье/новости
+    " Kommersant", "rbc.ru", "vedomosti.ru", "ria.ru", "tass.ru",
+}
+
 
 def domain_key(url: str) -> str:
-    """Регистрированный домен из URL: 'https://www.opt23.ru/cat?x' -> 'opt23.ru'."""
+    """Регистрируемый домен из URL: 'https://www.opt23.ru/cat?x' -> 'opt23.ru'."""
     if not url:
         return ""
     if "://" not in url:
@@ -35,6 +62,14 @@ def domain_key(url: str) -> str:
         return f"{ext.domain}.{ext.suffix}".lower() if ext.domain else ""
     except Exception:
         return ""
+
+
+def is_blacklisted(domain: str) -> bool:
+    return domain in DOMAIN_BLACKLIST
+
+
+# «продающие» заголовки — мусорное имя, используем домен
+RE_TITLE_JUNK = re.compile(r"^(купить|купим|продажа|цена|оптом|дешево|заказать|прайс|каталог|товары)", re.I)
 
 
 @dataclass
@@ -59,6 +94,7 @@ class SupplierCard:
     docs_verified: bool = False
     gov_contracts_count: int = 0
     gov_contracts_value: float = 0
+    gov_contract_examples: list[dict] = field(default_factory=list)
     relevance: int = 0
     reasons: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)   # field -> "источник"
@@ -77,37 +113,42 @@ class SupplierCard:
             "certificates": self.certificates, "docs_verified": self.docs_verified,
             "gov_contracts_count": self.gov_contracts_count,
             "gov_contracts_value": self.gov_contracts_value,
+            "gov_contract_examples": self.gov_contract_examples,
             "relevance": self.relevance, "reasons": self.reasons,
             "sources": self.sources, "enrichment_status": self.enrichment_status,
             "status": self.status,
         }
 
 
-def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gosplan: list[ContractHit],
+def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSupplier],
               region_name: str) -> list[SupplierCard]:
     """Слияние трёх источников в список карточек."""
     cards: list[SupplierCard] = []
 
     # --- 1. госконтракты: самый сильный источник (реальные сделки) ---
     gos_by_inn: dict[str, SupplierCard] = {}
-    for ch in gosplan:
+    for g in gov:
+        examples = [c.to_dict() for c in g.contracts[:5]]
+        note_parts = [f"«{(c.subject or 'контракт')[:60]}» — {(c.price or 0):,.0f} ₽"
+                      for c in g.contracts[:2]]
         card = SupplierCard(
-            name=ch.supplier_name, inn=ch.inn,
-            region=region_name, city=ch.address.split(",")[0].strip() if ch.address else "",
-            description=ch.address or "",
-            gov_contracts_count=1, gov_contracts_value=ch.price or 0,
-            price_note=f"контракт: {(ch.subject or '')[:80]}",
-            sources={"имя и ИНН": f"госконтракт 44-ФЗ №{ch.reg_num}",
-                     "цена": f"исполненный контракт №{ch.reg_num}: {(ch.price or 0):,.0f} ₽"},
+            name=g.name, inn=g.inn,
+            region=region_name, city=(g.address or "").split(",")[0].strip(),
+            description=g.address or "",
+            gov_contracts_count=g.count, gov_contracts_value=g.total_value,
+            gov_contract_examples=examples,
+            price_note="контракты: " + "; ".join(note_parts) if note_parts else "",
+            sources={
+                "имя, ИНН, адрес": f"реестр контрактов 44-ФЗ (Госплан API), ИНН {g.inn}",
+                "цены": f"{g.count} исполненных контрактов на {g.total_value:,.0f} ₽",
+            },
         )
-        gos_by_inn[ch.inn] = card
+        gos_by_inn[g.inn] = card
         cards.append(card)
 
     # --- 2. optlist: отраслевой каталог ---
     for oh in optlist:
-        # (а) merge по ИНН с госконтрактом
         target = gos_by_inn.get(oh.inn) if oh.inn else None
-        # (б) merge по fuzzy-имени с госконтрактом (только если нет ИНН-матча)
         if target is None:
             best, best_score = None, 0.0
             for c in gos_by_inn.values():
@@ -142,12 +183,10 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gosplan: list[Cont
     have_domains = {c.domain for c in cards if c.domain}
     for hit in serp:
         d = domain_key(hit.url)
-        if not d or d in have_domains:
+        if not d or d in have_domains or is_blacklisted(d):
             continue
-        # имя: до первого разделителя в title (часто «Бренд — купить оптом...»),
-        # иначе домен. Честно: SERP знает домен, а не юрлицо.
-        brand = re.split(r"\s*[|—–]\s*", hit.title)[0].strip()
-        name = brand if 2 < len(brand) <= 42 else d
+        brand = re.split(r"\s*[|—–-]\s*", hit.title)[0].strip()
+        name = brand if (2 < len(brand) <= 42 and not RE_TITLE_JUNK.match(brand)) else d
         card = SupplierCard(
             name=name,
             domain=d, site=hit.url, region=region_name,
@@ -165,8 +204,8 @@ def _absorb_optlist(card: SupplierCard, oh: OptlistHit) -> None:
     """optlist-данные дополняют карточку (не перезаписывают госконтрактные)."""
     if not card.city:
         card.city = oh.city
-    if not card.site:
-        card.site = f"https://optlist.ru/company/{oh.slug}"
+    if not card.domain and oh.site:
+        card.domain = domain_key(oh.site)
     if oh.email and oh.email not in card.emails:
         card.emails.append(oh.email)
         card.sources["email"] = f"optlist.ru/company/{oh.slug}"
@@ -186,10 +225,17 @@ def _absorb_optlist(card: SupplierCard, oh: OptlistHit) -> None:
 
 
 def _score_all(cards: list[SupplierCard], serp: list[SerpHit]) -> None:
-    """Детерминированный рейтинг (объяснимый, без магии).
+    """Детерминированный рейтинг 0-100 с внятным распределением.
 
-    госконтракты — самый сильный сигнал; каталог — средний; SERP-позиция —
-    мягкий буст. Контакты/документы добавляют доверия."""
+    Компоненты (сумма до 100):
+      госконтракты  до 40   — подтверждённый опыт поставок (главный сигнал)
+      каталог       15      — проверенный B2B-профиль
+      SERP-позиция  до 15   — топ органики региона
+      email         10      — есть прямой канал связи
+      цена предмета до 15   — известен ценовой ориентир по запросу
+      телефон      5       — второй канал
+      МОК/сертификаты/докум. до 15
+    """
     pos_by_domain: dict[str, int] = {}
     for h in serp:
         d = domain_key(h.url)
@@ -198,18 +244,24 @@ def _score_all(cards: list[SupplierCard], serp: list[SerpHit]) -> None:
     for c in cards:
         score = 0
         if c.gov_contracts_count:
-            score += 40 + min(c.gov_contracts_count * 5, 20)
-            score += min(int(c.gov_contracts_value / 1_000_000), 10)  # масштаб сделок
+            score += 30 + min(5 * c.gov_contracts_count, 10)
         if "optlist.ru" in str(c.sources.values()):
             score += 15
-        if c.domain in pos_by_domain:
-            score += max(0, (20 - pos_by_domain[c.domain])) // 2
+        pos = pos_by_domain.get(c.domain)
+        if pos:
+            score += 15 if pos <= 5 else (10 if pos <= 10 else 5)
         if c.emails:
-            score += 8
+            score += 10
+        if c.price_min or c.gov_contracts_value:
+            score += 15
         if c.phones:
             score += 5
+        if c.min_order:
+            score += 5
+        if c.certificates:
+            score += 5
         if c.docs_verified:
-            score += 7
+            score += 5
         c.relevance = min(score, 100)
 
 
@@ -238,14 +290,13 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
     for cert in facts.certificates:
         if cert not in card.certificates:
             card.certificates.append(cert)
-    card.sources.setdefault("контакты", f"сайт {facts.url}")
-    # числовая вилка цен из строковых цен (price-parser)
+    if card.emails or card.phones:
+        card.sources.setdefault("контакты", f"сайт {facts.url}")
+    # числовая вилка цен ПО ПРЕДМЕТУ ЗАПРОСА (LLM извлекает только релевантные)
     values = [v for p in facts.prices if (v := normalize_price(p))]
     if values and not card.price_min:
         nums = [v for v, _ in values]
         card.price_min = min(nums)
         card.price_max = max(nums) if len(nums) > 1 else None
         card.price_note = "; ".join(f"{v:g} {u}" for v, u in values[:3])
-        card.sources["цена"] = f"сайт {facts.url}"
-    if card.emails and card.phones:
-        card.relevance = min(100, card.relevance + 5)
+        card.sources["цена"] = f"сайт {facts.url} (по предмету запроса)"
