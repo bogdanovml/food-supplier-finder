@@ -43,6 +43,7 @@ DOMAIN_BLACKLIST: set[str] = {
     "fl.ru", "b2b-center.ru", "prodirectory.ru", "foodbay.com", "prodal.ru",
     "suplfood.ru", "foods.ru", "mosex.name", "agrorus.com", "opt-union.ru",
     "sakh.com", "bloha.ru", "tenderguru.ru", "sdelanogroup.ru",
+    "agroserver.ru", "suppliers.ru", "postavshhikov.net", "1sept.ru",
     # соцсети/видео/справка
     "vk.com", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",
     "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru",
@@ -185,10 +186,10 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSuppl
         d = domain_key(hit.url)
         if not d or d in have_domains or is_blacklisted(d):
             continue
-        brand = re.split(r"\s*[|—–-]\s*", hit.title)[0].strip()
-        name = brand if (2 < len(brand) <= 42 and not RE_TITLE_JUNK.match(brand)) else d
+        # имя = домен: честно (поисковик знает домен, а не юрлицо).
+        # Заголовки-«купить оптом в СПб» — мусор, не имя поставщика.
         card = SupplierCard(
-            name=name,
+            name=d,
             domain=d, site=hit.url, region=region_name,
             description=hit.snippet, serp_urls=[hit.url],
             sources={"домен, сниппет": f"поиск {hit.engine}: позиция {hit.position}"},

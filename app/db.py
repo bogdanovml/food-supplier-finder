@@ -336,7 +336,7 @@ def list_registry(limit: int = 500) -> list[dict]:
     """Реестр с агрегированными товарами: один поставщик -> список категорий."""
     with db() as c:
         rows = c.execute(
-            "SELECT r.*, GROUP_CONCAT(DISTINCT rp.query, ' | ') AS products "
+            "SELECT r.*, GROUP_CONCAT(rp.query, '||') AS products "
             "FROM registry r LEFT JOIN registry_products rp ON rp.registry_key = r.key "
             "GROUP BY r.key "
             "ORDER BY r.gov_contracts_value DESC, r.searches_count DESC, r.last_seen DESC "
@@ -347,7 +347,7 @@ def list_registry(limit: int = 500) -> list[dict]:
             d = dict(r)
             for k in ("emails", "phones", "certificates"):
                 d[k] = _uj(d.get(k), [])
-            d["products"] = [p.strip() for p in (d.get("products") or "").split("|") if p.strip()]
+            d["products"] = [p.strip() for p in (d.get("products") or "").split("||") if p.strip()]
             out.append(d)
         return out
 
