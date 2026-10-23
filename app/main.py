@@ -26,6 +26,11 @@ from . import rfq as rfq_mod
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")
 
+# Фейл-фаст: провайдеры/ключи — только в .env; без них сервис не стартует
+_problems = get_settings().validate_secrets()
+if _problems:
+    raise RuntimeError("Отсутствуют обязательные переменные .env: " + "; ".join(_problems))
+
 app = FastAPI(title="Food Supplier Finder", version="0.1.0")
 STATIC = Path(__file__).parent / "static"
 

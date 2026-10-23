@@ -1,8 +1,8 @@
-"""LLM-клиент: OpenAI-compatible endpoint (gpt.ai-tools.su).
+"""LLM-клиент: OpenAI-compatible endpoint (провайдер задаётся в .env: LLM_BASE_URL).
 
 Маршрутизация по сложности:
-  ask(simple=...) -> gemma4:31b   — классификация, планирование запросов (дёшево, часто)
-  ask(smart=...)  -> gemini-3.8-flash-high — структурированное извлечение, RFQ-письма
+  ask(simple=...) -> LLM_MODEL_SIMPLE   — дешёвые задачи (классификация, план запросов)
+  ask(smart=...)  -> LLM_MODEL_SMART  — структурирование, RFQ-письма
 
 JSON-вызовы: модель просим отвечать строго JSON; парсим с фолбэком на
 ```\njson ... ```-блок (модели любят оборачивать)."""
