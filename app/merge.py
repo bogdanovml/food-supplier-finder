@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rapidfuzz import fuzz
+import re
 import tldextract
 
 from .extraction import normalize_price
@@ -141,8 +142,12 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gosplan: list[Cont
         d = domain_key(hit.url)
         if not d or d in have_domains:
             continue
+        # имя: до первого разделителя в title (часто «Бренд — купить оптом...»),
+        # иначе домен. Честно: SERP знает домен, а не юрлицо.
+        brand = re.split(r"\s*[|—–]\s*", hit.title)[0].strip()
+        name = brand if 2 < len(brand) <= 42 else d
         card = SupplierCard(
-            name=hit.title.split("—")[0].split("—")[0].strip() or d,
+            name=name,
             domain=d, site=hit.url, region=region_name,
             description=hit.snippet, serp_urls=[hit.url],
             sources={"домен, сниппет": f"поиск {hit.engine}: позиция {hit.position}"},

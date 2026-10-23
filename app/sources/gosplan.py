@@ -73,33 +73,43 @@ async def search_food_contracts(query: str, *, region_code: int | None,
     """Исполненные контракты по предмету + детали с именами поставщиков.
 
     Ищем по stage=E (исполняется) и EC (завершено) — это «живые» сделки.
-    Детали (имена поставщиков) тянем только по top-N контрактов — беречь rate limit.
+    Детали (имена поставщиков) тянем только по top-N — беречь rate limit.
+
+    Стратегия запроса: точная фраза -> фолбэк на упрощённый (первые 2 слова):
+    узкие формулировки («в/с», ГОСТ-номера) в предметах контрактов почти не
+    встречаются дословно, а поставщик того же товара — тот же.
     """
+    simplified = " ".join(query.split()[:2]) or query
+    attempts = [f'"{query}"', simplified] if simplified != query else [query, f'"{query}"']
+
     hits: list[ContractHit] = []
     async with _client() as client:
-        for stage in ("EC", "E"):
-            params: dict = {"subject": f'"{query}"', "stage": stage, "limit": limit,
-                            "sort": "price_desc"}
-            if region_code:
-                params["region"] = region_code
-            data = await _get(client, "/fz44/contracts", params)
-            if data is None:
-                continue
-            for it in data if isinstance(data, list) else []:
-                try:
-                    hits.append(ContractHit(
-                        supplier_name="", inn=(it.get("suppliers") or [""])[0],
-                        kpp=None, address=None,
-                        customer_inn=it.get("customer"),
-                        reg_num=it.get("reg_num"),
-                        price=float(it.get("price") or 0) or None,
-                        subject=it.get("subject"),
-                        region=it.get("region"), stage=stage,
-                    ))
-                except (TypeError, ValueError):
+        for subject_q in attempts:
+            for stage in ("EC", "E"):
+                params: dict = {"subject": subject_q, "stage": stage, "limit": limit,
+                                "sort": "price_desc"}
+                if region_code:
+                    params["region"] = region_code
+                data = await _get(client, "/fz44/contracts", params)
+                if data is None:
                     continue
-            if len(hits) >= limit // 2:
-                break  # EC-контрактов (завершённых) обычно достаточно
+                for it in data if isinstance(data, list) else []:
+                    try:
+                        hits.append(ContractHit(
+                            supplier_name="", inn=(it.get("suppliers") or [""])[0],
+                            kpp=None, address=None,
+                            customer_inn=it.get("customer"),
+                            reg_num=it.get("reg_num"),
+                            price=float(it.get("price") or 0) or None,
+                            subject=it.get("subject"),
+                            region=it.get("region"), stage=stage,
+                        ))
+                    except (TypeError, ValueError):
+                        continue
+                if len(hits) >= limit // 2:
+                    break  # завершённых (EC) обычно достаточно
+            if hits:
+                break  # фолбэк не нужен, если точная фраза нашла контракты
 
         # детали топ-N контрактов: имена/адреса поставщиков
         details_tasks = [h.reg_num for h in hits[:max_details] if h.reg_num]

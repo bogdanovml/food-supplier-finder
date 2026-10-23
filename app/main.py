@@ -13,7 +13,9 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field
-from sse_starlette.sse import EventGeneratorResponse
+from sse_starlette.sse import EventSourceResponse
+
+from fastapi.staticfiles import StaticFiles
 
 from . import db, export, regions
 from .config import get_settings
@@ -83,7 +85,7 @@ async def api_search(body: SearchQuery, request: Request):
             except (asyncio.CancelledError, Exception):
                 pass
 
-    return EventGeneratorResponse(gen(), ping=15)
+    return EventSourceResponse(gen(), ping=15)
 
 
 # ------------------------------ REST ------------------------------
@@ -194,6 +196,9 @@ async def api_export_csv(search_id: int):
 
 
 # ------------------------------ static UI ------------------------------
+
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
 
 @app.get("/")
 async def index():

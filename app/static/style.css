@@ -1,0 +1,34 @@
+/* Food Supplier Finder — компактные стили поверх Bootstrap */
+
+body { background: #F6F9F7; }
+
+/* этапы пайплайна */
+.stage-card {
+  border: 1px solid #d8e5df;
+  border-radius: 10px;
+  padding: .5rem .75rem;
+  background: #fff;
+  min-height: 58px;
+}
+.stage-card .stage-name { font-size: .8rem; }
+.stage-card .stage-note { font-size: .72rem; color: #6c757d; line-height: 1.15; }
+.stage-pending   { opacity: .45; }
+.stage-run       { border-color: #0dcaf0; box-shadow: 0 0 0 3px rgba(13,202,240,.12); }
+.stage-done      { border-color: #198754; background: #f0faf4; }
+.stage-skipped   { border-color: #adb5bd; background: #f8f9fa; }
+.stage-failed    { border-color: #dc3545; }
+
+/* табличные бейджи */
+.badge-src { font-size: .68rem; }
+.provenance { font-size: .72rem; color: #6c757d; }
+.provenance b { color: #37474F; }
+
+#suppliers-table .tabulator-row.active { background: #e7f5ec !important; }
+
+/* детали поставщика: секции */
+.sc-section { margin-bottom: .9rem; }
+.sc-section h6 { color: #198754; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+.sc-fact { display: flex; gap: .5rem; font-size: .9rem; margin-bottom: .25rem; }
+.sc-fact .src { color: #198754; font-size: .7rem; white-space: nowrap; align-self: baseline; }
+
+pre#rfq-body { max-height: 40vh; overflow-y: auto; margin-bottom: 0; }
