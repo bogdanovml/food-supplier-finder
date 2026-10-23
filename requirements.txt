@@ -1,3 +1,7 @@
+trafilatura>=1.12
+price-parser>=0.4
+rapidfuzz>=3.0
+playwright>=1.40
 fastapi>=0.115
 uvicorn[standard]>=0.32
 httpx>=0.28
