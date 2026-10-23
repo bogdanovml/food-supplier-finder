@@ -1011,8 +1011,12 @@ async function openRegistry() {
         initialSort: [{ column: "gov_contracts_count", dir: "desc" }],
       });
     }
-    registryTable.setData(data.suppliers);
-    new bootstrap.Modal(document.getElementById("registry-modal")).show();
+    const modalEl = document.getElementById("registry-modal");
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modalEl.addEventListener("shown.bs.modal", () => {
+      registryTable.setData(data.suppliers).then(() => registryTable.redraw(true));
+    }, { once: true });
+    modal.show();
   } catch (err) {
     alert("Не удалось загрузить базу поставщиков: " + err.message);
   }
