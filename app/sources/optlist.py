@@ -59,19 +59,22 @@ class OptlistClient:
     def __init__(self) -> None:
         self._browser = None
         self._context = None
-        self._lock = asyncio.Lock()  # только старт браузера
+        self._lock = asyncio.Lock()      # старт браузера (однократно)
         self._broken = False
 
     async def _ensure_browser(self):
+        if self._browser is not None:
+            return
         async with self._lock:
-            if self._browser is None:
-                from playwright.async_api import async_playwright
-                self._pw = await async_playwright().start()
-                self._browser = await self._pw.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                )
-                self._context = await self._browser.new_context(user_agent=UA, locale="ru-RU")
+            if self._browser is not None:   # double-check после ожидания лока
+                return
+            from playwright.async_api import async_playwright
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            )
+            self._context = await self._browser.new_context(user_agent=UA, locale="ru-RU")
 
     async def _get(self, url: str, *, min_len: int = PAGE_MIN_LEN,
                    must_contain: list[str] | None = None,
@@ -111,18 +114,17 @@ class OptlistClient:
         """Оба поиска: по поставщикам и по товарам. Ошибки -> [] (не роняем пайплайн)."""
         if self._broken:
             return []
-        async with self._lock:
-            try:
-                hits: dict[str, OptlistHit] = {}
-                for path in (f"/wholesales?q={query}", f"/products?q={query}"):
-                    html = await self._get(f"https://optlist.ru{path}", min_len=30000)
-                    for hit in self._parse_search(html):
-                        if hit.slug not in hits:
-                            hits[hit.slug] = hit
-                return list(hits.values())
-            except Exception as exc:
-                logger.warning("optlist search failed: %s", exc)
-                return []
+        try:
+            hits: dict[str, OptlistHit] = {}
+            for path in (f"/wholesales?q={query}", f"/products?q={query}"):
+                html = await self._get(f"https://optlist.ru{path}", min_len=30000)
+                for hit in self._parse_search(html):
+                    if hit.slug not in hits:
+                        hits[hit.slug] = hit
+            return list(hits.values())
+        except Exception as exc:
+            logger.warning("optlist search failed: %s", exc)
+            return []
 
     def _parse_search(self, html: str) -> list[OptlistHit]:
         """Карточки в блоках itemprop="itemListElement" (schema.org Organization)."""
