@@ -57,7 +57,8 @@ def _valid_emails(supplier: dict) -> list[str]:
     return out
 
 
-async def send_letter(search: dict, suppliers: list[dict], extra: str = "") -> dict:
+async def send_letter(search: dict, suppliers: list[dict], extra: str = "",
+                      custom_subject: str | None = None, custom_body: str | None = None) -> dict:
     """Генерация + отправка. Возвращает отчёт по каждому адресату."""
     s = get_settings()
     recipients_map: list[tuple[dict, list[str]]] = []
@@ -70,7 +71,10 @@ async def send_letter(search: dict, suppliers: list[dict], extra: str = "") -> d
                    "no_recipients", "ни у одного поставщика нет валидного email")
         return {"sent": 0, "failed": 0, "detail": [], "status": "no_recipients"}
 
-    subject, body = await draft_letter(search["query"], search["region"], suppliers, extra)
+    if custom_subject and custom_body:
+        subject, body = custom_subject.strip(), custom_body.strip()
+    else:
+        subject, body = await draft_letter(search["query"], search["region"], suppliers, extra)
 
     async def send_one(to: str) -> tuple[str, str]:
         msg = EmailMessage()

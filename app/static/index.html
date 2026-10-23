@@ -3,119 +3,280 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Food Supplier Finder — поиск поставщиков продуктов питания</title>
+  <title>Food Supplier Finder | Аналитическая система поиска поставщиков продуктов питания</title>
   <link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
   <link rel="stylesheet" href="/static/vendor/tabulator.min.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-<nav class="navbar navbar-dark bg-success-subtle py-3 mb-4 border-bottom">
-  <div class="container">
-    <div>
-      <h1 class="h3 mb-0 text-success-emphasis">🍞 Food Supplier Finder</h1>
-      <div class="text-secondary-emphasis small">Поиск и сравнение поставщиков продуктов питания — поисковики, каталог optlist, госконтракты 44-ФЗ</div>
-    </div>
-    <div id="history-box" class="text-end small text-secondary-emphasis"></div>
-  </div>
-</nav>
+<body class="app-body">
 
-<main class="container pb-5">
-
-  <!-- ============ Форма поиска ============ -->
-  <section class="card shadow-sm mb-4">
-    <div class="card-body">
-      <form id="search-form" class="row g-2 align-items-end">
-        <div class="col-md">
-          <label class="form-label mb-1 small text-secondary">Что ищем?</label>
-          <input id="query" class="form-control form-control-lg" placeholder="например: мука пшеничная в/с, упаковка для кофе, томатная паста…" required>
+  <!-- ==================== HEADER ==================== -->
+  <header class="app-header border-bottom">
+    <div class="container-fluid px-4 py-3 d-flex justify-content-between align-items-center">
+      <div class="d-flex align-items-center gap-3">
+        <div class="brand-mark">FSF</div>
+        <div>
+          <div class="d-flex align-items-center gap-2">
+            <span class="brand-title">Food Supplier Finder</span>
+            <span class="badge badge-subtle">B2B Procurement</span>
+          </div>
+          <div class="brand-subtitle">Агрегатор и аналитическая система выбора пищевых поставщиков (Яндекс, Google, optlist.ru, 44-ФЗ)</div>
         </div>
-        <div class="col-md-3">
-          <label class="form-label mb-1 small text-secondary">Регион</label>
-          <select id="region" class="form-select form-select-lg"></select>
+      </div>
+      <div class="d-flex align-items-center gap-3">
+        <div class="dropdown" id="history-dropdown-wrapper">
+          <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" id="history-dropdown-btn">
+            История поисков
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end shadow-sm" id="history-menu">
+            <li><span class="dropdown-item text-muted small">История пуста</span></li>
+          </ul>
         </div>
-        <div class="col-md-auto">
-          <button class="btn btn-success btn-lg px-4" type="submit" id="search-btn">Найти поставщиков</button>
-        </div>
-      </form>
-    </div>
-  </section>
-
-  <!-- ============ Прогресс пайплайна ============ -->
-  <section id="progress-section" class="d-none mb-4">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-          <h2 class="h6 mb-0 text-secondary-emphasis">Живой поиск по источникам — вы видите каждый этап</h2>
-          <span id="progress-timer" class="badge text-bg-light border"></span>
-        </div>
-        <div id="stages" class="row row-cols-2 row-cols-md-4 g-2"></div>
-        <div id="progress-log" class="mt-2 font-monospace text-secondary small" style="max-height:120px;overflow-y:auto"></div>
       </div>
     </div>
-  </section>
+  </header>
 
-  <!-- ============ Результаты ============ -->
-  <section id="results-section" class="d-none">
-    <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
-      <h2 class="h5 mb-0">Найденные поставщики <span id="results-count" class="badge text-bg-success"></span></h2>
-      <div class="btn-group">
-        <button class="btn btn-outline-success btn-sm" id="btn-export-xlsx" disabled>⬇ Excel</button>
-        <button class="btn btn-outline-success btn-sm" id="btn-export-csv" disabled>⬇ CSV (Google Sheets)</button>
-        <button class="btn btn-outline-success btn-sm" id="btn-rfq" disabled>✉ Запросить КП (RFQ)</button>
+  <!-- ==================== MAIN CONTENT ==================== -->
+  <main class="container-fluid px-4 py-4">
+
+    <!-- SEARCH PANEL -->
+    <div class="card card-surface mb-4">
+      <div class="card-body p-4">
+        <form id="search-form" class="row g-3 align-items-end">
+          <div class="col-lg-6 col-md-5">
+            <label for="query" class="form-label-meta">Предмет закупки или категория</label>
+            <input id="query" class="form-control form-control-search"
+                   placeholder="Например: мука пшеничная в/с, томатная паста, упаковка дой-пак..."
+                   value="мука пшеничная в/с" required autofocus>
+          </div>
+          <div class="col-lg-3 col-md-4">
+            <label for="region" class="form-label-meta">Регион поставки</label>
+            <select id="region" class="form-select form-select-search"></select>
+          </div>
+          <div class="col-lg-3 col-md-3 d-flex gap-2">
+            <button class="btn btn-primary-custom flex-grow-1" type="submit" id="search-btn">
+              <span class="spinner-border spinner-border-sm me-2 d-none" id="search-spinner" role="status"></span>
+              <span id="search-btn-text">Найти поставщиков</span>
+            </button>
+          </div>
+        </form>
       </div>
     </div>
-    <div class="card shadow-sm">
-      <div class="card-body p-0 p-md-2">
-        <div id="suppliers-table"></div>
+
+    <!-- ONBOARDING ZERO-STATE -->
+    <div id="zero-state" class="card card-surface mb-4">
+      <div class="card-body p-5">
+        <div class="row g-4 align-items-center">
+          <div class="col-lg-4 border-end">
+            <div class="step-num">01</div>
+            <div class="step-title">Многоканальный сбор</div>
+            <div class="step-desc">Одновременный опрос региональной выдачи Яндекса, Google XML, оптового каталога optlist.ru и реестра госконтрактов 44-ФЗ.</div>
+          </div>
+          <div class="col-lg-4 border-end">
+            <div class="step-num">02</div>
+            <div class="step-title">Обогащение и дедупликация</div>
+            <div class="step-desc">Слияние по ИНН, доменам и нечетким наименованиям. Автоматический обход сайтов: извлечение контактов, цен, сертификатов (ХАССП, ГОСТ) и минимального заказа.</div>
+          </div>
+          <div class="col-lg-4">
+            <div class="step-num">03</div>
+            <div class="step-title">Принятие решения и RFQ</div>
+            <div class="step-desc">Сравнение условий side-by-side, обоснование выбора от LLM, ведение заметок и рассылка запросов коммерческих предложений.</div>
+          </div>
+        </div>
       </div>
     </div>
-    <div class="form-text text-secondary mt-1">
-      Каждая карточка помечена источником данных (поиск / каталог / госконтракт / сайт компании).
-      Отметьте поставщиков галочками — и отправьте им запрос коммерческого предложения.
-    </div>
-  </section>
 
-  <!-- ============ Детали поставщика (offcanvas) ============ -->
-  <div class="offcanvas offcanvas-end" tabindex="-1" id="supplier-canvas" style="width:520px">
-    <div class="offcanvas-header bg-success-subtle">
-      <h5 class="offcanvas-title" id="sc-name">Поставщик</h5>
+    <!-- PIPELINE PROGRESS -->
+    <div id="progress-section" class="card card-surface mb-4 d-none">
+      <div class="card-header bg-transparent py-3 d-flex justify-content-between align-items-center">
+        <div>
+          <span class="card-header-title">Прогресс сбора и обработки данных</span>
+          <span class="text-muted small ms-2">Сквозной пайплайн в реальном времени (Server-Sent Events)</span>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+          <span class="badge badge-meta" id="progress-timer">0 с</span>
+          <span class="badge badge-status-running" id="pipeline-status-badge">Выполняется</span>
+        </div>
+      </div>
+      <div class="card-body p-4">
+        <div id="stages" class="row row-cols-1 row-cols-sm-2 row-cols-md-4 g-3 mb-3"></div>
+        <div class="terminal-bar">
+          <div class="terminal-dot"></div>
+          <div id="terminal-ticker" class="terminal-text">Инициализация конвейера поиска...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RESULTS WORKSPACE -->
+    <div id="results-section" class="d-none">
+
+      <!-- KPI METRICS BAR -->
+      <div class="row g-3 mb-4">
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">Всего поставщиков</div>
+            <div class="kpi-value" id="kpi-total">0</div>
+            <div class="kpi-sub" id="kpi-sources-breakdown">Источники: 44-ФЗ, каталог, поиск</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">С прямыми контактами</div>
+            <div class="kpi-value" id="kpi-contacts">0</div>
+            <div class="kpi-sub">Телефон или верифицированный email</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">С ценовыми ориентирами</div>
+            <div class="kpi-value" id="kpi-prices">0</div>
+            <div class="kpi-sub">Госконтракты или прайс сайтов</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="kpi-card">
+            <div class="kpi-label">Время сбора данных</div>
+            <div class="kpi-value" id="kpi-time">0 с</div>
+            <div class="kpi-sub" id="kpi-speed">Полный цикл конвейера</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTION TOOLBAR -->
+      <div class="card card-surface mb-3">
+        <div class="card-body p-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+          
+          <!-- Filter pills -->
+          <div class="btn-group btn-group-sm" role="group" id="filter-pills">
+            <button type="button" class="btn btn-outline-secondary active" data-filter="all">Все (<span id="count-all">0</span>)</button>
+            <button type="button" class="btn btn-outline-secondary" data-filter="gov">44-ФЗ Контракты (<span id="count-gov">0</span>)</button>
+            <button type="button" class="btn btn-outline-secondary" data-filter="optlist">Каталог optlist (<span id="count-optlist">0</span>)</button>
+            <button type="button" class="btn btn-outline-secondary" data-filter="contacts">С email для RFQ (<span id="count-contacts">0</span>)</button>
+          </div>
+
+          <!-- Actions -->
+          <div class="d-flex align-items-center gap-2">
+            <span class="selection-pill d-none" id="selection-pill">Выбрано: <strong id="selection-count">0</strong></span>
+            <button class="btn btn-sm btn-outline-primary" id="btn-compare" disabled>Сравнить выбранных</button>
+            <button class="btn btn-sm btn-primary-custom" id="btn-rfq" disabled>Запросить КП (RFQ)</button>
+            <div class="btn-group btn-group-sm">
+              <button class="btn btn-outline-secondary" id="btn-export-xlsx">Экспорт XLSX</button>
+              <button class="btn btn-outline-secondary" id="btn-export-csv">Экспорт CSV</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- MAIN DATA TABLE -->
+      <div class="card card-surface">
+        <div class="card-body p-0">
+          <div id="suppliers-table"></div>
+        </div>
+        <div class="card-footer bg-transparent py-2 px-3 d-flex justify-content-between align-items-center small text-muted">
+          <span>Клик по строке открывает досье поставщика и аудит источников. Для массовых действий отметьте чекбоксы.</span>
+          <span id="table-page-info"></span>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- ==================== DOSSIER OFFCANVAS ==================== -->
+  <div class="offcanvas offcanvas-end offcanvas-dossier" tabindex="-1" id="supplier-canvas">
+    <div class="offcanvas-header border-bottom">
+      <div>
+        <div class="text-uppercase small text-muted tracking-wide" id="sc-pretitle">Досье контрагента</div>
+        <h5 class="offcanvas-title fw-bold" id="sc-name">Наименование поставщика</h5>
+      </div>
       <button type="button" class="btn-close" data-bs-dismiss="offcanvas"></button>
     </div>
-    <div class="offcanvas-body" id="sc-body"></div>
+    <div class="offcanvas-body p-4" id="sc-body">
+      <!-- Injected by app.js -->
+    </div>
   </div>
 
-  <!-- ============ RFQ модалка ============ -->
+  <!-- ==================== COMPARISON MODAL ==================== -->
+  <div class="modal fade" id="compare-modal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header border-bottom">
+          <div>
+            <h5 class="modal-title fw-bold">Сравнительный анализ поставщиков</h5>
+            <div class="small text-muted">Матрица ключевых коммерческих параметров для принятия решения</div>
+          </div>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body p-0" id="compare-modal-body">
+          <!-- Comparison table injected by app.js -->
+        </div>
+        <div class="modal-footer border-top">
+          <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+          <button type="button" class="btn btn-sm btn-primary-custom" id="compare-to-rfq-btn">Перейти к отправке КП</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== RFQ COMPOSER MODAL ==================== -->
   <div class="modal fade" id="rfq-modal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
       <div class="modal-content">
-        <div class="modal-header bg-success-subtle">
-          <h5 class="modal-title">✉ Запрос коммерческого предложения</h5>
-          <button class="btn-close" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body">
-          <div id="rfq-recipients" class="mb-3"></div>
-          <label class="form-label small text-secondary">Дополнительные требования (объём, сроки, ГОСТы — попадут в письмо)</label>
-          <textarea id="rfq-extra" class="form-control mb-3" rows="2" placeholder="Например: объём 5 т/мес, нужна доставка до 3 дней, безналичная оплата"></textarea>
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <strong>Черновик письма</strong>
-            <button class="btn btn-sm btn-outline-secondary" id="rfq-regen">🔄 Переписать</button>
+        <div class="modal-header border-bottom">
+          <div>
+            <h5 class="modal-title fw-bold">Подготовка запроса коммерческого предложения (RFQ)</h5>
+            <div class="small text-muted">Деловое письмо генерируется моделью и доступно для ручной редакции</div>
           </div>
-          <div id="rfq-subject" class="fw-semibold mb-1"></div>
-          <pre id="rfq-body" class="border rounded p-3 bg-light" style="white-space:pre-wrap"></pre>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
-        <div class="modal-footer">
-          <span class="text-secondary small me-auto">Отправка — с вашего SMTP (.env). Логи — в таблице rfq_log.</span>
-          <button class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
-          <button class="btn btn-success" id="rfq-send-btn" disabled>Отправить поставщикам</button>
+        <div class="modal-body p-4">
+          
+          <div class="mb-3">
+            <label class="form-label-meta">Список получателей</label>
+            <div id="rfq-recipients-chips" class="d-flex flex-wrap gap-2 p-2 border rounded bg-light"></div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label-meta" for="rfq-extra">Дополнительные условия закупки</label>
+            <textarea id="rfq-extra" class="form-control form-control-sm" rows="2"
+                      placeholder="Например: объем 2 т/мес, безналичный расчет с НДС, склад самовывоза в черте МКАД..."></textarea>
+          </div>
+
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <label class="form-label-meta mb-0" for="rfq-subject">Тема письма</label>
+            <button class="btn btn-sm btn-link text-decoration-none p-0" id="rfq-regen-btn">Перегенерировать через ИИ</button>
+          </div>
+          <input type="text" id="rfq-subject" class="form-control mb-3">
+
+          <label class="form-label-meta" for="rfq-body">Текст коммерческого запроса (редактируемый)</label>
+          <textarea id="rfq-body" class="form-control font-monospace small mb-2" rows="12"></textarea>
+          <div class="text-muted small">Отредактируйте текст перед отправкой при необходимости. Все изменения сохраняются в логе отправки.</div>
+
+        </div>
+        <div class="modal-footer border-top d-flex justify-content-between">
+          <div id="rfq-dispatch-status" class="small text-muted"></div>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="rfq-mailto-btn">Открыть в почтовой программе</button>
+            <button type="button" class="btn btn-sm btn-primary-custom" id="rfq-send-btn">Отправить через SMTP</button>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
-</main>
+  <!-- Toast Notification Container -->
+  <div class="toast-container position-fixed bottom-0 end-0 p-3">
+    <div id="app-toast" class="toast align-items-center border-0 shadow" role="alert">
+      <div class="d-flex">
+        <div class="toast-body" id="toast-message">Действие выполнено</div>
+        <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+      </div>
+    </div>
+  </div>
 
-<script src="/static/vendor/bootstrap.bundle.min.js"></script>
-<script src="/static/vendor/tabulator.min.js"></script>
-<script src="/static/app.js"></script>
+  <script src="/static/vendor/bootstrap.bundle.min.js"></script>
+  <script src="/static/vendor/tabulator.min.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

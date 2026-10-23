@@ -149,7 +149,10 @@ def regex_facts(url: str, text: str) -> SiteFacts:
                                 for x in RE_CERT.findall(text)))[:4]
     m = RE_DELIVERY.search(text)
     if m:
-        f.delivery = re.sub(r"\s+", " ", m.group(1))[:140]
+        candidate = re.sub(r"\s+", " ", m.group(1))[:140]
+        nav_keywords = ("прайс-лист", "акции", "корзина", "личный кабинет", "каталог", "контакты", "главная")
+        if not any(kw in candidate.lower() for kw in nav_keywords):
+            f.delivery = candidate
     return f
 
 

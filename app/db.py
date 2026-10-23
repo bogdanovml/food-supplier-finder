@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
     reasons TEXT,
     sources TEXT,
     enrichment_status TEXT DEFAULT 'pending',
+    status TEXT DEFAULT 'new',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_suppliers_search ON suppliers(search_id);
@@ -82,6 +83,11 @@ def _conn() -> sqlite3.Connection:
         conn = sqlite3.connect(get_settings().db_path)
         conn.row_factory = sqlite3.Row
         conn.executescript(SCHEMA)
+        try:
+            conn.execute("ALTER TABLE suppliers ADD COLUMN status TEXT DEFAULT 'new'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
         _local.conn = conn
     return conn
 
@@ -131,7 +137,9 @@ def list_searches(limit: int = 20) -> list[dict]:
     with db() as c:
         rows = c.execute(
             "SELECT s.*, (SELECT COUNT(*) FROM suppliers sp WHERE sp.search_id=s.id) AS n_suppliers "
-            "FROM searches s ORDER BY s.id DESC LIMIT ?", (limit,)
+            "FROM searches s "
+            "WHERE (SELECT COUNT(*) FROM suppliers sp WHERE sp.search_id=s.id) > 0 "
+            "ORDER BY s.id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -149,12 +157,14 @@ SUPPLIER_COLS = [
     "site", "description", "categories", "price_min", "price_max", "price_note",
     "min_order", "delivery", "certificates", "gov_contracts_count",
     "gov_contracts_value", "relevance", "reasons", "sources",
-    "enrichment_status",
+    "enrichment_status", "status",
 ]
 
 
 def insert_supplier(data: dict) -> int:
     payload = {k: data.get(k) for k in SUPPLIER_COLS}
+    if not payload.get("status"):
+        payload["status"] = "new"
     for k in ("phones", "emails", "categories", "certificates", "reasons", "sources"):
         payload[k] = _j(payload[k]) if payload[k] is not None else None
     cols = ", ".join(SUPPLIER_COLS)
@@ -191,6 +201,13 @@ def get_supplier(supplier_id: int) -> dict | None:
         for k in ("phones", "emails", "categories", "certificates", "reasons", "sources"):
             d[k] = _uj(d.get(k), [] if k in ("phones", "emails", "categories", "certificates") else {})
         return d
+
+
+def update_supplier_status(supplier_id: int, status: str) -> bool:
+    with db() as c:
+        cur = c.execute("UPDATE suppliers SET status=? WHERE id=?", (status, supplier_id))
+        c.commit()
+        return cur.rowcount > 0
 
 
 # ------------------------------ notes ------------------------------

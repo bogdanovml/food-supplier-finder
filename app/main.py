@@ -46,10 +46,16 @@ class NoteIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class StatusIn(BaseModel):
+    status: str = Field(min_length=2, max_length=40)
+
+
 class RFQIn(BaseModel):
     search_id: int
     supplier_ids: list[int]
     extra_requirements: str = ""
+    subject: str | None = None
+    body: str | None = None
 
 
 # ------------------------------ SSE поиск ------------------------------
@@ -127,6 +133,14 @@ async def api_add_note(supplier_id: int, body: NoteIn):
     return {"id": note_id, "notes": db.get_notes(supplier_id)}
 
 
+@app.patch("/api/suppliers/{supplier_id}/status")
+async def api_update_status(supplier_id: int, body: StatusIn):
+    if not db.get_supplier(supplier_id):
+        raise HTTPException(404, "поставщик не найден")
+    ok = db.update_supplier_status(supplier_id, body.status)
+    return {"ok": ok, "status": body.status}
+
+
 # ------------------------------ RFQ ------------------------------
 
 @app.post("/api/rfq/preview")
@@ -160,7 +174,12 @@ async def api_rfq_send(body: RFQIn):
     suppliers = [db.get_supplier(sid) for sid in body.supplier_ids]
     suppliers = [x for x in suppliers if x]
     try:
-        result = await rfq_mod.send_letter(search, suppliers, body.extra_requirements)
+        result = await rfq_mod.send_letter(
+            search, suppliers, body.extra_requirements,
+            custom_subject=body.subject, custom_body=body.body,
+        )
+        for sup in suppliers:
+            db.update_supplier_status(sup["id"], "rfq_sent")
     except LLMError as exc:
         raise HTTPException(502, f"LLM недоступен: {exc}")
     return result

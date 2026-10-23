@@ -63,6 +63,7 @@ class SupplierCard:
     reasons: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)   # field -> "источник"
     enrichment_status: str = "pending"
+    status: str = "new"
     serp_urls: list[str] = field(default_factory=list)
 
     def to_row(self) -> dict:
@@ -78,6 +79,7 @@ class SupplierCard:
             "gov_contracts_value": self.gov_contracts_value,
             "relevance": self.relevance, "reasons": self.reasons,
             "sources": self.sources, "enrichment_status": self.enrichment_status,
+            "status": self.status,
         }
 
 
