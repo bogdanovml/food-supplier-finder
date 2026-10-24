@@ -255,7 +255,7 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSuppl
             city=dh.city or _clean_city(dh.address), region=region_name,
             director=dh.director or None, reg_date=dh.reg_date or None,
             revenue_note=dh.revenue or None,
-            description=dh.address,
+            okved=dh.okved_code or None,
             sources={"юрлицо, адрес, выручка": f"ЕГРЮЛ: каталог checko.ru, ОКВЭД {dh.okved_code}, ОГРН {dh.ogrn}"},
         )
         if dh.revenue:

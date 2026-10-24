@@ -252,13 +252,18 @@ def merge_facts(a: SiteFacts, b: SiteFacts) -> SiteFacts:
 
 
 async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFacts:
-    """Полный enrichment: httpx -> regex -> (JS-рендер если SPA-оболочка)
+    """Полный enrichment: httpx -> (Playwright-рендер если httpx заблокирован или SPA)
     -> страницы контактов -> LLM (цены по предмету + опт/розница)."""
     html = await fetch_html(url)
     if not html:
-        return SiteFacts(url=url, method="failed")
+        # httpx заблокирован анти-ботом (кейс auchan.ru: 0 байт) — рендер браузером
+        rendered = await render_html(url)
+        if not rendered:
+            return SiteFacts(url=url, method="failed")
+        html = rendered
     full_text = _text_of(html)
     facts = regex_facts(url, full_text)
+    facts.rendered = True
 
     # --- JS-оболочка? видимого текста критически мало -> рендер браузером.
     # (regex-«цены» из навигации не считаем данными: после рендера переизвлекаем)

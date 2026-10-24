@@ -256,11 +256,14 @@ async def by_inn(inn: str) -> CompanyInfo | None:
     return _parse_card(html, url=f"{BASE}/search?query={inn}")
 
 
-async def by_name(name: str, *, min_score: int = 75) -> CompanyInfo | None:
+async def by_name(name: str, *, min_score: int = 75, trust_first: bool = False) -> CompanyInfo | None:
     """Юрлицо по названию: DaData suggest -> fuzzy-валидация -> checko (фолбэк).
 
     Валидация обязательна: «Ромашка» найдёт десятки тёзок по всей стране —
     берём только уверенное совпадение имени.
+    trust_first=True — пропустить fuzzy (для латинских брендов из домена:
+    «auchan.ru» -> 'auchan' -> ООО «АШАН»: кириллица против латиницы
+    fuzzy всегда отвергнет, а поисковый движок DaData уже сделал матчинг).
     """
     clean = re.sub(r"[«»\"']", "", name).strip()
     if len(clean) < 4:
@@ -273,7 +276,7 @@ async def by_name(name: str, *, min_score: int = 75) -> CompanyInfo | None:
             score = fuzz.token_sort_ratio(clean.lower(), s.get("value", "").lower())
             if best is None or score > best[1]:
                 best = (s, score)
-        if best and best[1] >= min_score:
+        if best and (trust_first or best[1] >= min_score):
             info = _party_to_info(best[0], "dadata.ru (ЕГРЮЛ, поиск по названию)")
             if info.inn:
                 return info

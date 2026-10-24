@@ -170,7 +170,11 @@ async def _structure_reasons(cards: list, query: str, emit: Emit) -> None:
                 "value": c.gov_contracts_value,
                 "contract_example": (c.gov_contract_examples or [{}])[0].get("subject", "")[:80],
                 "min_order": c.min_order, "price_note": (c.price_note or "")[:80],
+                "revenue": (c.revenue_note or "")[:30],
+                "okved": (c.okved or "")[:20],
+                "director": (c.director or "")[:40],
                 "certificates": "; ".join(c.certificates[:3]),
+                "kind": (c.sources.get("тип") or "")[:40],
                 "has_email": bool(c.emails), "docs": c.docs_verified}
                 for i, c in enumerate(top)]
     try:
@@ -209,6 +213,10 @@ def _fallback_reason(card) -> str:
         subj = (ex.get("subject") or "продукцию")[:60]
         return (f"Подтверждённый поставщик госзаказчиков: {card.gov_contracts_count} "
                 f"контракт(ов) на {card.gov_contracts_value:,.0f} ₽, включая «{subj}»")
+    if card.revenue_note:
+        okved_part = f", ОКВЭД {card.okved}" if card.okved else ""
+        return (f"Действующее юрлицо отрасли{okved_part}, выручка {card.revenue_note} —"
+                f" масштаб соответствует оптовым поставкам")
     if card.price_min:
         note = card.price_note[:80]
         return f"Есть ценовой ориентир: {note} — можно сравнивать до запроса КП"
@@ -262,9 +270,16 @@ async def _run_company(cards: list, emit: Emit, limit: int = 14) -> None:
                     c.inn = info.inn
                     c.sources["ИНН"] = f"ЕГРЮЛ: найден по ОГРН {c.ogrn}"
             elif not c.ogrn:
-                info = await companyinfo_src.by_name(c.name)
+                # у органики имя = домен: ищем юрлицо по бренду из домена
+                # (кейс auchan.ru -> 'auchan' -> ООО «АШАН») или по названию
+                if c.domain:
+                    brand = c.domain.split(".")[0]
+                    info = await companyinfo_src.by_name(brand, trust_first=True)
+                if not info:
+                    info = await companyinfo_src.by_name(c.name)
                 if info:
                     c.inn = info.inn
+                    c.sources["юрлицо"] = f"ЕГРЮЛ (dadata.ru): найдено по бренду сайта"
             if info and info.inn:
                 if not c.inn:
                     c.inn = info.inn
