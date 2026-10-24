@@ -46,6 +46,12 @@ DOMAIN_BLACKLIST: set[str] = {
     "agroserver.ru", "suppliers.ru", "postavshhikov.net", "1sept.ru",
     # досье/вакансии/финансы — не сайты поставщиков
     "hh.ru", "superjob.ru", "spark-interfax.ru", "audit-it.ru", "casebook.ru",
+    "saby.ru", "kontur.ru", "tochka.com", "klerk.ru", "star-pro.ru",
+    "vbankcenter.ru", "synapsenet.ru", "licexpert.ru", "2gis.ru",
+    "prima-inform.ru", "otc.ru", "tbank.ru", "trudvsem.ru", "tass.ru",
+    # отраслевые каталоги/справочники food
+    "fishnet.ru", "fishretail.ru", "fishery.ru", "akvakultura.ru",
+    "svoefermerstvo.ru", "shopprodukt.ru", "ikra.info", "ved55.ru",
     "kartoteka.ru", "banki.ru", "sravni.ru", "vc.ru", "bankcenterfinance.ru",
     # соцсети/видео/справка
     "vk.com", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",

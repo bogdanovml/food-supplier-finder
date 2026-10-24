@@ -88,14 +88,17 @@ async def _fetch_one(client: httpx.AsyncClient, *, engine: str, url: str, query:
 
 
 async def fetch_serp(queries: list[str], *, lr: int, top: int | None = None,
-                     progress=None) -> list[SerpHit]:
+                     progress=None, engines: list[str] | None = None) -> list[SerpHit]:
     """Параллельно собираем SERP по всем запросам из двух движков.
 
+    engines: ограничение движков (например, ['yandex'] для сайт-поиска по
+    юрлицу — Google-запросы не тратим, когда хватает одного движка).
     progress: async-callback(engine, query, found) для live-обновления UI.
     """
     s = get_settings()
     top = top or s.serp_top
     sem = asyncio.Semaphore(4)  # не DDoS-им платный API
+    engines = engines or ["yandex", "google"]
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(25, connect=10)) as client:
         async def _task(engine: str, endpoint: str, query: str):
@@ -108,10 +111,12 @@ async def fetch_serp(queries: list[str], *, lr: int, top: int | None = None,
         tasks = [
             _task("yandex", s.xmlstock_yandex_url, q)
             for q in queries
-        ] + [
-            _task("google", s.xmlstock_google_url, q)
-            for q in queries
         ]
+        if "google" in engines:
+            tasks += [
+                _task("google", s.xmlstock_google_url, q)
+                for q in queries
+            ]
         results = await asyncio.gather(*tasks)
 
     return [h for chunk in results for h in chunk]

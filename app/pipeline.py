@@ -422,38 +422,115 @@ async def _maps_pass(cards: list, emit: Emit, region_name: str, limit: int = 10)
     await asyncio.gather(*(_maps(c) for c in candidates))
 
 
-async def _find_sites_for(cards: list, emit: Emit, limit: int = 8) -> None:
-    """Сайт-поиск для карточек из ЕГРЮЛ-каталога без домена (кейс МАРИТАЙМ ГРУП:
-    «сайт не обнаружен», хотя гуглится первой строкой).
+def _translit_key(tokens: list[str]) -> str:
+    """Транслит названия для домен-матчинга: «морфиш» -> 'morfish',
+    «знатная мука» -> 'znatnayamuka' (дефисы/точки домена игнорируются)."""
+    lat = {"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+           "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+           "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+           "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+           "э": "e", "ю": "yu", "я": "ya"}
+    return "".join(lat.get(ch, "") for t in tokens for ch in t.lower())
 
-    Кого ищем: карточки с юрлицом/выручкой (реальные компании), но без сайта.
-    Как: одна Яндекс-выдача по «"<юрлицо>" официальный сайт» — первый
-    не-блэклистовый домен становится сайтом компании.
+
+async def _find_sites_for(cards: list, emit: Emit, limit: int = 60) -> None:
+    """Сайт компании по юрлицу: один Яндекс-запрос через XML-провайдера.
+
+    Практика: если у компании сайт вообще есть — юрлицо выводит его в топ-10
+    выдачи. Сканируем все 10 позиций, матчинг по токенам названия
+    (строгое вхождение «ООО Морфиш» редко встречается на их же сайте —
+    там пишут «Морфиш» или брендом), агрегаторы отрезает блэклист.
+
+    Фолбэк-запрос по короткому имени (без «ООО») если топ-10 по полному
+    юрлицу не сматчился. Параллельно (4 запроса одновременно).
     """
     from .merge import domain_key, is_blacklisted
-    candidates = [c for c in cards if (c.legal_name or c.name) and not c.domain and not c.site]
-    candidates.sort(key=lambda c: c.relevance, reverse=True)
-    for c in candidates[:limit]:
-        try:
-            legal = (c.legal_name or c.name).replace("«", " ").replace("»", " ").replace('"', " ")
-            legal = re.sub(r"\s+", " ", legal).strip()
-            hits = await serp_src.fetch_serp(
-                [f'{legal} официальный сайт'], lr=225, top=5)
+
+    def core_tokens(name: str) -> list[str]:
+        """Значимые токены названия: без организационно-правовых форм."""
+        stop = {"ооо", "ао", "пао", "зао", "оао", "ип", "ано", "фгуп", "гк", "тд",
+                "официальный", "сайт", "компания", "группа", "торговый", "дом"}
+        cleaned = re.sub(r"[«»\"']", " ", name.lower())
+        toks = [t for t in re.split(r"[\s,.]+", cleaned) if len(t) > 2 and t not in stop]
+        return toks
+
+    sem = asyncio.Semaphore(4)
+    found = 0
+
+    async def _find_one(c):
+        nonlocal found
+        legal = (c.legal_name or c.name).replace("«", " ").replace("»", " ").replace('"', " ")
+        legal = re.sub(r"\s+", " ", legal).strip()
+        tokens = core_tokens(legal)
+        if not tokens:
+            return
+        # запрос строго по полному юрлицу: короткое имя ловит тёзок
+        # (кейс «Морфиш» -> мореходный институт morfish.ru) — не используем
+        for query in (legal,):
+            # Яндекс XML на ночном тарифе (00:00-06:00 MSK) — если пусто,
+            # пробуем Google: сайт компании есть у обоих в топ-10
+            hits: list = []
+            for engine in ("yandex", "google"):
+                async with sem:
+                    try:
+                        hits = await serp_src.fetch_serp([query], lr=225, top=10,
+                                                         engines=[engine])
+                    except Exception as exc:
+                        logger.debug("site search '%s' via %s failed: %s", query, engine, exc)
+                        hits = []
+                if hits:
+                    break
+            # --- скоринг кандидатов: не «первый в топе», а лучший ---
+            # 3 сигнала: домен-транслит названия (сильнейший), вхождение
+            # в title, вхождение в сниппет; отсекаем страницы-профили
+            # отраслевых каталогов (/company/123) — они всегда выше
+            # сайтов мелких компаний в выдаче
+            best = None  # (score, hit, domain)
             for h in hits:
                 d = domain_key(h.url)
                 if not d or is_blacklisted(d):
                     continue
-                # «официальный сайт» от прямого вхождения имени в сниппете
-                if legal.lower() not in (h.title + h.snippet).lower():
-                    continue
-                c.domain = d
+                low_url = h.url.lower()
+                if re.search(r"/(compan(y|ies)|firm|org|catalog|supplier|postavshhik|"
+                             r"vendo?rs?|b2b|contragent|kontragent|proverka|"
+                             r"organization|organizaci|find\?|search\?)", low_url) \
+                        or re.search(r"/(id|firm)/\d+", low_url):
+                    continue  # досье-страница/каталог, не сайт компании
+                blob = (h.title + " " + h.snippet).lower()
+                matched = sum(1 for t in tokens if t in blob)
+                if matched < max(1, len(tokens) // 2):
+                    continue  # компания лишь упомянута на чужой странице
+                # транслит по ПОЛНОМУ хосту: сайты мелких компаний часто
+                # живут на поддоменах билдеров (морфиш -> morfish.clients.site)
+                host = h.url.split("//", 1)[-1].split("/", 1)[0]
+                host_clean = re.sub(r"[^a-z0-9]", "", host)
+                score = matched * 2 - h.position * 0.3
+                if _translit_key(tokens) and _translit_key(tokens) in host_clean:
+                    score += 10  # хост = транслит названия
+                if any(t in h.title.lower() for t in tokens):
+                    score += 3  # в title сильнее, чем в сниппете
+                if best is None or score > best[0]:
+                    best = (score, h, d)
+            # порог 3: сниппет-матчей недостаточно (мусор), нужен
+            # транслит-хост или вхождение названия в title страницы
+            if best and best[0] >= 3:
+                _s, h, d = best
+                # билдер-поддомены (морфиш.clients.site): хранить полный хост,
+                # иначе разные компании на одном билдере склеятся в дедупе
+                host = h.url.split("//", 1)[-1].split("/", 1)[0]
+                host = host.removeprefix("www.")
+                c.domain = host if host != d else d
                 c.site = h.url
-                c.sources["сайт"] = f"найден поиском по названию юрлица: {d}"
-                await emit({"type": "stage", "stage": "enrich", "status": "run",
-                            "message": f"сайт для {legal}: {d}"})
-                break
-        except Exception as exc:
-            logger.debug("find site for %s failed: %s", legal, exc)
+                c.sources["сайт"] = f"найден поиском по юрлицу: {d}"
+                found += 1
+                await emit({"type": "stage", "stage": "company", "status": "run",
+                            "message": f"сайт найден: {legal[:40]} -> {d}"})
+                return
+
+    candidates = [c for c in cards
+                  if (c.legal_name or c.name) and not c.domain and not c.site]
+    candidates.sort(key=lambda c: c.relevance, reverse=True)
+    await asyncio.gather(*(_find_one(c) for c in candidates[:limit]))
 
 
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
