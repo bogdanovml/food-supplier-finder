@@ -405,8 +405,15 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
             await emit({"type": "supplier", "data": _row(c)})
         except Exception as exc:
             logger.debug("company stage card %s failed: %s", c.name, exc)
+
+    # финальный проход: чеко-ссылка по любому идентификатору (ИНН или ОГРН —
+    # поиск редиректит на карточку); DaData мог дать ОГРН только что
+    for c in cards:
+        ident = c.ogrn or c.inn
+        if ident and not c.checko_url:
+            c.checko_url = f"https://checko.ru/search?query={ident}"
     await emit({"type": "stage", "stage": "company", "status": "done",
-                "found": sum(1 for c in top if c.inn)})
+                "found": sum(1 for c in cards if c.inn)})
 
 
 async def _find_sites_for(cards: list, emit: Emit, limit: int = 8) -> None:
