@@ -78,7 +78,7 @@ def _clean_city(raw: str | None) -> str:
     raw = raw[:1].upper() + raw[1:] if raw else ""
     # «622018, СВЕРДЛОВСКАЯ ОБЛ...» -> берём первый НЕ-числовой сегмент
     for part in raw.split(","):
-        part = part.strip()
+        part = re.sub(r"^г\.?\s*", "", part.strip(), flags=re.IGNORECASE).strip("., ")
         if part and not part.isdigit() and not re.match(r"^\d{5,6}$", part) and len(part) > 2:
             # не «р-он АМЗ», не индекс: первые буквы — кириллица/латиница
             if re.match(r"^[А-ЯЁA-Z]", part):
