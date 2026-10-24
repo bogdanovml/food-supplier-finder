@@ -46,6 +46,11 @@ RE_MOK = re.compile(
     re.IGNORECASE)
 RE_DELIVERY = re.compile(
     r"(доставк\w+[^.]{5,120})", re.IGNORECASE)
+# маркеры условий заказа: оплата и логистика
+RE_ORDER_TERMS = re.compile(
+    r"(безналичн\w+ расч\w*|нал\w* при получении|отсрочк\w+ платеж\w*|предоплат\w*|"
+    r"самовывоз\w*|транспортной компанией|ТК\b|собственн\w+ транспорт\w*|"
+    r"отгрузк\w+ со склад\w+|со склада в \w+|минимальн\w+ сумм\w+ заказ\w*)", re.IGNORECASE)
 
 BAD_EMAIL_DOMAINS = {"sentry.io", "example.com", "wixpress.com", "yandex.ru"}
 
@@ -171,6 +176,15 @@ def regex_facts(url: str, text: str) -> SiteFacts:
         nav_keywords = ("прайс-лист", "акции", "корзина", "личный кабинет", "каталог", "контакты", "главная")
         if not any(kw in candidate.lower() for kw in nav_keywords):
             f.delivery = candidate
+    markers = []
+    for m in RE_ORDER_TERMS.finditer(text):
+        val = m.group(1).strip().lower()
+        if val not in markers:
+            markers.append(val)
+        if len(markers) >= 5:
+            break
+    if markers:
+        f.order_terms = " · ".join(markers[:5])
     return f
 
 
@@ -406,7 +420,9 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                 cpage_text = _text_of(contact_html)
             return regex_facts(c_url, cpage_text)
 
-        cf_list = await _aio.gather(*(_cpage(sfx) for sfx in ("kontakty", "contacts", "kontakty.html")))
+        cf_list = await _aio.gather(*(_cpage(sfx) for sfx in
+                                       ("kontakty", "contacts", "kontakty.html",
+                                        "dostavka", "oplata", "oplata-i-dostavka")))
         for cf in cf_list:
             for e in cf.emails:
                 if e not in facts.emails:
@@ -414,6 +430,10 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             for ph in cf.phones:
                 if ph not in facts.phones:
                     facts.phones.append(ph)
+            if cf.order_terms and not facts.order_terms:
+                facts.order_terms = cf.order_terms
+            if cf.delivery and not facts.delivery:
+                facts.delivery = cf.delivery
         if facts.emails or facts.phones:
             facts.ok = True
 
