@@ -44,6 +44,9 @@ DOMAIN_BLACKLIST: set[str] = {
     "suplfood.ru", "foods.ru", "mosex.name", "agrorus.com", "opt-union.ru",
     "sakh.com", "bloha.ru", "tenderguru.ru", "sdelanogroup.ru",
     "agroserver.ru", "suppliers.ru", "postavshhikov.net", "1sept.ru",
+    # досье/вакансии/финансы — не сайты поставщиков
+    "hh.ru", "superjob.ru", "spark-interfax.ru", "audit-it.ru", "casebook.ru",
+    "kartoteka.ru", "banki.ru", "sravni.ru", "vc.ru", "bankcenterfinance.ru",
     # соцсети/видео/справка
     "vk.com", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",
     "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru",
