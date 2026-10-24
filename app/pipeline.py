@@ -259,6 +259,11 @@ async def _run_company(cards: list, emit: Emit, limit: int = 18) -> None:
     # домен-карточки бустим: бренд-лукап дешёвый и даёт юрлицо даже пустышке
     rest.sort(key=lambda c: (c.relevance + (10 if c.domain else 0)), reverse=True)
     top = (with_inn + rest)[:limit]
+
+    def is_bl(d: str) -> bool:
+        from .merge import is_blacklisted
+        return is_blacklisted(d)
+
     for c in top:
         try:
             info = None
@@ -308,7 +313,30 @@ async def _run_company(cards: list, emit: Emit, limit: int = 18) -> None:
                 c.sources["юрлицо"] = f"ЕГРЮЛ ({src}): {info.legal_name or c.name}"
                 if info.status and info.status != "Действующая":
                     c.relevance = 0
-            # узнав ИНН — проверяем полный опыт 44-ФЗ
+            # --- контакты из карточки ЕГРЮЛ (checko) для юрлиц без них ---
+            if c.ogrn and not (c.emails or c.phones):
+                try:
+                    cc = await companyinfo_src.contacts_by_ogrn(c.ogrn)
+                    if cc:
+                        for p in cc.get("phones", [])[:2]:
+                            if p not in c.phones:
+                                c.phones.append(p)
+                        for e in cc.get("emails", [])[:2]:
+                            if e not in c.emails:
+                                c.emails.append(e)
+                        if cc.get("site") and not c.site:
+                            from .merge import domain_key
+                            d = domain_key(cc["site"])
+                            if d and not is_bl(d):
+                                c.domain = d
+                                c.site = ("https://" + cc["site"])
+                                c.sources["сайт"] = f"ЕГРЮЛ (checko.ru): {d}"
+                        if cc.get("phones") or cc.get("emails"):
+                            c.sources["контакты"] = "ЕГРЮЛ: карточка checko.ru"
+                except Exception as exc:
+                    logger.debug("contacts_by_ogrn for %s failed: %s", c.ogrn, exc)
+
+            # узнав ИНН — проверяем полный опыт 44/223-ФЗ
             if c.inn and c.gov_contracts_count == 0:
                 stat = await gosplan_src.contracts_by_inn(c.inn, limit=5)
                 if stat["count"]:

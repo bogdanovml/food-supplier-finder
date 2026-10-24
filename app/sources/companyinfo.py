@@ -312,3 +312,52 @@ async def by_name(name: str, *, min_score: int = 75, trust_first: bool = False) 
     if not card_html:
         return None
     return _parse_card(card_html, url=f"{BASE}{href}")
+
+
+async def contacts_by_ogrn(ogrn: str) -> dict:
+    """Контакты и сайт юрлица из карточки ЕГРЮЛ на checko (по ОГРН — редирект).
+
+    Кейс ООО «АВИСТРОН»: в листинге каталога только выручка/директор,
+    а в полной карточке — телефоны, email и сайт. Карточка открывается
+    через поиск по ОГРН (301-редирект на /company/<slug>-<ОГРН>).
+    """
+    if not ogrn or not re.match(r"^\d{13}$", ogrn):
+        return {}
+    out: dict = {}
+    async with _sem:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
+                                      headers={"User-Agent": UA}) as client:
+            html = await _fetch(client, f"{BASE}/search?query={ogrn}")
+    if not html:
+        return {}
+    import html as html_mod
+    text = html_mod.unescape(re.sub(r"<[^>]+>", " ", html))
+    text = re.sub(r"\s+", " ", text)
+
+    phones: list[str] = []
+    for m in re.finditer(r"\+7[\s\-()]*\d{3}[\s\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}", text[:80000]):
+        p = m.group(0)
+        digits = re.sub(r"\D", "", p)
+        if len(digits) == 11 and digits[0] == "7":
+            formatted = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
+            if formatted not in phones:
+                phones.append(formatted)
+        if len(phones) >= 2:
+            break
+    if phones:
+        out["phones"] = phones
+
+    emails: list[str] = []
+    for m in re.finditer(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,6}", text[:80000]):
+        e = m.group(0).lower()
+        if e not in emails and not e.endswith(("@checko.ru", "@example.com")):
+            emails.append(e)
+        if len(emails) >= 2:
+            break
+    if emails:
+        out["emails"] = emails
+
+    m = re.search(r"Веб-сайт\s+([a-z0-9\-]+\.[a-z0-9\-.]{2,30})\s", text[:80000], re.I)
+    if m:
+        out["site"] = m.group(1).strip(".")
+    return out
