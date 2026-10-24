@@ -336,6 +336,9 @@ async def _checko_contacts_pass(cards: list, emit: Emit) -> None:
     контактов берётся именно здесь (~0.5с на карточку)."""
     from .merge import domain_key, is_blacklisted
 
+    def _real_site(c) -> bool:
+        return bool(c.site and "optlist.ru" not in c.site)
+
     async def _fill(c):
         try:
             cc = await companyinfo_src.contacts_by_ogrn(c.ogrn or c.inn)
@@ -350,7 +353,7 @@ async def _checko_contacts_pass(cards: list, emit: Emit) -> None:
         for e in cc.get("emails", [])[:2]:
             if e not in c.emails:
                 c.emails.append(e)
-        if cc.get("site") and not c.site:
+        if cc.get("site") and not _real_site(c):
             d = domain_key(cc["site"])
             if d and not is_blacklisted(d):
                 c.domain = d
@@ -431,6 +434,12 @@ def _translit_key(tokens: list[str]) -> str:
            "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
            "э": "e", "ю": "yu", "я": "ya"}
     return "".join(lat.get(ch, "") for t in tokens for ch in t.lower())
+
+
+def _has_real_site(c) -> bool:
+    """Профиль optlist.ru/company/<slug> — не сайт компании: каталог.
+    Каталожные ссылки НЕ считаем сайтом при поиске/обходе."""
+    return bool(c.site and "optlist.ru" not in c.site)
 
 
 async def _find_sites_for(cards: list, emit: Emit, limit: int = 60) -> None:
@@ -527,7 +536,7 @@ async def _find_sites_for(cards: list, emit: Emit, limit: int = 60) -> None:
                 return
 
     candidates = [c for c in cards
-                  if (c.legal_name or c.name) and not c.domain and not c.site]
+                  if (c.legal_name or c.name) and not _has_real_site(c)]
     candidates.sort(key=lambda c: c.relevance, reverse=True)
     await asyncio.gather(*(_find_one(c) for c in candidates[:limit]))
 
@@ -593,7 +602,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         # --- 4. Сайт-поиск по названию юрлица: для тех, кто ещё без
         #     контактов и без сайта (Яндекс XML ~1.5с/шт) ---
         siteless = [c for c in cards
-                    if not (c.emails or c.phones) and not c.site
+                    if not (c.emails or c.phones) and not _has_real_site(c)
                     and (c.legal_name or c.name)]
         if siteless:
             siteless.sort(key=lambda c: c.relevance, reverse=True)
@@ -607,9 +616,9 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         await emit({"type": "stage", "stage": "enrich", "status": "start"})
         by_domain = {c.domain: c for c in cards if c.domain}
         contactless = [c for c in cards
-                       if c.site and not (c.emails or c.phones)]
+                       if _has_real_site(c) and not (c.emails or c.phones)]
         partial = [c for c in cards
-                   if c.site and (c.emails or c.phones)
+                   if _has_real_site(c) and (c.emails or c.phones)
                    and not (c.price_min or c.min_order)]
         contactless.sort(key=lambda x: x.relevance, reverse=True)
         partial.sort(key=lambda x: x.relevance, reverse=True)
