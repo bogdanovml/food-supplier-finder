@@ -311,7 +311,9 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
     from .merge import region_ok as _rok
     maps_candidates = [c for c in cards
                         if c.city and _rok(c.city, region_name)
-                        and not c.maps_url][:8]
+                        and not c.maps_url]
+    maps_candidates.sort(key=lambda c: c.relevance, reverse=True)
+    maps_candidates = maps_candidates[:10]
     if maps_candidates:
         await emit({"type": "stage", "stage": "company", "status": "run",
                     "message": f"Яндекс Карты: рейтинг {len(maps_candidates)} компаний"})
