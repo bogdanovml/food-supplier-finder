@@ -295,6 +295,16 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
         if cc.get("checko_url"):
             c.checko_url = cc["checko_url"]
 
+    # --- всё ещё без контактов и без сайта: ищем сайт по названию юрлица ---
+    siteless = [c for c in cards
+                if not (c.emails or c.phones) and not c.site
+                and (c.legal_name or c.name)]
+    if siteless:
+        siteless.sort(key=lambda c: c.relevance, reverse=True)
+        await emit({"type": "stage", "stage": "company", "status": "run",
+                    "message": f"поиск сайтов по названию: {min(len(siteless), 25)} компаний"})
+        await _find_sites_for(siteless[:25], emit, limit=25)
+
     # --- Яндекс Карты: рейтинг и отзывы для топ-карточек в регионе ---
     from .sources.maps import org_profile
     from .merge import region_ok as _rok
@@ -401,7 +411,7 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
     ogr_cards = [c for c in cards
                  if (c.ogrn or c.inn) and not (c.emails or c.phones)]
     ogr_cards.sort(key=lambda c: c.relevance, reverse=True)
-    ogr_cards = ogr_cards[:30]
+    ogr_cards = ogr_cards[:60]
     if ogr_cards:
         await emit({"type": "stage", "stage": "company", "status": "run",
                     "message": f"контакты из карточек ЕГРЮЛ: {len(ogr_cards)} юрлиц"})
@@ -491,14 +501,18 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         for c in sorted(cards, key=lambda x: x.relevance, reverse=True):
             await emit({"type": "supplier", "data": _row(c)})
 
-        # --- юрлица без сайта (ЕГРЮЛ-каталог) — ищем сайт по названию ---
-        await _find_sites_for(cards, emit)
+        # --- юрлица и контакты ПЕРВЫМИ: DaData (ОГРН/юрлицо) -> checko-карточки
+        # (контакты+сайт одним визитом) -> сайт-поиск по названию. Все карточки
+        # получают максимум идентификаторов и сайтов ДО обхода.
+        await emit({"type": "stage", "stage": "enrich", "status": "pending"})
+        await _run_company(cards, emit, region_name)
 
-        # --- enrich: карточки без контактов, включая каталоговые с найденным сайтом ---
+        # --- ОДИН обход сайтов: теперь покрывает и сайты, найденные в checko/
+        # поиске по названию (раньше они отыскивались после обхода — зря) ---
         await emit({"type": "stage", "stage": "enrich", "status": "start"})
+        by_domain = {c.domain: c for c in cards if c.domain}
         to_enrich = [c for c in cards
-                     if c.site and c.enrichment_status == "pending"
-                     and not (c.emails and c.phones)]
+                     if c.site and not (c.emails and c.phones)]
         to_enrich = sorted(to_enrich, key=lambda x: x.relevance, reverse=True)[:s.enrich_max_sites]
 
         async def prog(url: str, facts) -> None:
@@ -516,12 +530,8 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         for c in to_enrich:
             if c.enrichment_status == "pending":
                 c.enrichment_status = "failed"
-        _pessimize_thin(cards)
         await emit({"type": "stage", "stage": "enrich", "status": "done",
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
-
-        # --- юрлица: dadata/checko + опыт 44-ФЗ по ИНН ---
-        await _run_company(cards, emit, region_name)
 
         # --- гео-несовпадение: поставщик из другого города при поиске
         #     по городу федерального значения — минус к рейтингу + заметка ---
