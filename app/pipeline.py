@@ -327,6 +327,12 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
                 c.maps_reviews = prof.get("reviews")
                 c.sources["рейтинг"] = (f"Яндекс Карты: {prof.get('rating')} "
                                        f"({prof.get('reviews')} отзывов)")
+            else:
+                # профиля на Картах нет (типично для B2B) — глубокая ссылка
+                # на поисковую выдачу, юзер может открыть и посмотреть сам
+                from urllib.parse import quote
+                c.maps_url = ("https://yandex.ru/maps/?text="
+                              + quote(f"{query_name} {c.city}"))
 
         await asyncio.gather(*(_maps(c) for c in maps_candidates))
 

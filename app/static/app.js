@@ -710,8 +710,8 @@ async function openDossier(row) {
       </div>` : ""}
       ${supplier.maps_url ? `
       <div class="dossier-row">
-        <span class="dossier-row-label">Профиль на Картах</span>
-        <span class="dossier-row-value"><a href="${escapeHtml(supplier.maps_url)}" target="_blank" class="text-decoration-none">Открыть отзывы и адрес</a></span>
+        <span class="dossier-row-label">${supplier.maps_rating ? "Профиль на Картах" : "Поиск на Картах"}</span>
+        <span class="dossier-row-value"><a href="${escapeHtml(supplier.maps_url)}" target="_blank" class="text-decoration-none">${supplier.maps_rating ? "Открыть отзывы и адрес" : "Найти организацию на карте"}</a></span>
       </div>` : ""}
       ${supplier.checko_url ? `
       <div class="dossier-row">
