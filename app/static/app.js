@@ -664,6 +664,17 @@ async function openDossier(row) {
         <span class="dossier-row-label">Условия доставки</span>
         <span class="dossier-row-value">${escapeHtml(supplier.delivery || "Уточняются при запросе КП")}</span>
       </div>
+      ${supplier.order_terms ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Условия заказа</span>
+        <span class="dossier-row-value">${escapeHtml(supplier.order_terms)}</span>
+      </div>` : ""}
+      ${(supplier.product_links && supplier.product_links.length) ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Разделы и прайсы</span>
+        <span class="dossier-row-value">${supplier.product_links.map(u =>
+          `<a href="${escapeHtml(u)}" target="_blank" class="text-decoration-none d-block small">${escapeHtml(u.length > 60 ? u.slice(0, 60) + "…" : u)}</a>`).join("")}</span>
+      </div>` : ""}
       <div class="dossier-row">
         <span class="dossier-row-label">Стандарты / ГОСТ</span>
         <span class="dossier-row-value">${(supplier.certificates && supplier.certificates.length) ? supplier.certificates.map(escapeHtml).join(", ") : "Декларация соответствия ТР ТС"}</span>
