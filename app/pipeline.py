@@ -246,16 +246,18 @@ def _pessimize_all(cards) -> None:
     _pessimize_thin(cards)
 
 
-async def _run_company(cards: list, emit: Emit, limit: int = 14) -> None:
+async def _run_company(cards: list, emit: Emit, limit: int = 18) -> None:
     """Юрлица: dadata/checko по ИНН/ОГРН/названию + полный опыт 44/223-ФЗ.
 
-    Приоритет проверки — карточки с известным ИНН (быстрая валидация ЕГРЮЛ),
-    затем остальные по рейтингу."""
+    Приоритет: (1) карточки с известным ИНН — быстрая валидация ЕГРЮЛ;
+    (2) домен-карточки (бренд-лукап через DaData, кейс auchan.ru);
+    (3) остальные по рейтингу."""
     await emit({"type": "stage", "stage": "company", "status": "start",
                 "message": "Проверка юрлиц через ЕГРЮЛ (DaData) и опыт 44/223-ФЗ по ИНН"})
     with_inn = [c for c in cards if c.inn]
     rest = [c for c in cards if not c.inn]
-    rest.sort(key=lambda c: c.relevance, reverse=True)
+    # домен-карточки бустим: бренд-лукап дешёвый и даёт юрлицо даже пустышке
+    rest.sort(key=lambda c: (c.relevance + (10 if c.domain else 0)), reverse=True)
     top = (with_inn + rest)[:limit]
     for c in top:
         try:
