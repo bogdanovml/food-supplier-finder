@@ -16,6 +16,21 @@ const STAGES_CONFIG = {
   done:      { num: "10", name: "Готовность", note: "Фиксация результатов в аналитической БД" }
 };
 
+/* Города федерального значения — строгий гео-матчинг (зеркалит merge.py) */
+const CITY_REGION_ALIASES = {
+  "Москва": ["москва", "moscow"],
+  "Санкт-Петербург": ["санкт-петербург", "спб", "петербург", "санкт петербург"],
+  "Севастополь": ["севастополь"],
+};
+function isFederalCityRegion(region) { return Object.keys(CITY_REGION_ALIASES).includes(region); }
+function cardInRegion(s) {
+  if (!isFederalCityRegion(currentSearchRegion)) return true;
+  const city = (s.city || "").toLowerCase().trim();
+  if (!city) return true; // гео неизвестно — не фильтруем
+  const aliases = CITY_REGION_ALIASES[currentSearchRegion];
+  return aliases.some(a => a.includes(city) || city.includes(a));
+}
+
 const WORKFLOW_STATUSES = {
   new:         { label: "Новый", class: "badge-wf-new" },
   rfq_sent:    { label: "КП запрошено", class: "badge-wf-rfq_sent" },
@@ -114,6 +129,9 @@ async function onStartSearch(e) {
   currentSearchQuery = query;
   currentSearchRegion = region;
   suppliersMap.clear();
+
+  // гео-фильтр «В регионе» включен по умолчанию для городов федерального значения
+  setDefaultFilter(isFederalCityRegion(region) ? "region" : "all");
 
   // UI state transition
   document.getElementById("zero-state").classList.add("d-none");
@@ -316,6 +334,7 @@ function refreshKpis(forcedSeconds = null) {
 
   // Filter pill badges
   document.getElementById("count-all").textContent = total;
+  document.getElementById("count-region").textContent = list.filter(cardInRegion).length;
   document.getElementById("count-gov").textContent = govCount;
   document.getElementById("count-optlist").textContent = optlistCount;
   document.getElementById("count-contacts").textContent = list.filter(s => s.emails && s.emails.length).length;
@@ -503,11 +522,20 @@ function updateTableData() {
   applyTableFilter(activeFilter);
 }
 
+function setDefaultFilter(key) {
+  document.querySelectorAll("#filter-pills button").forEach(b => {
+    b.classList.toggle("active", b.dataset.filter === key);
+  });
+  applyTableFilter(key);
+}
+
 function applyTableFilter(filterKey) {
   activeFilter = filterKey;
   if (!table) return;
   if (filterKey === "all") {
     table.clearFilter();
+  } else if (filterKey === "region") {
+    table.setFilter((data) => cardInRegion(data));
   } else if (filterKey === "gov") {
     table.setFilter("gov_contracts_count", ">", 0);
   } else if (filterKey === "optlist") {

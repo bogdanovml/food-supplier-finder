@@ -25,7 +25,7 @@ from . import db
 from .config import get_settings
 from .extraction import enrich_sites
 from .llm import ask_json, LLMError
-from .merge import merge_all, apply_enrichment
+from .merge import merge_all, apply_enrichment, region_ok
 from .okpd import suggest_codes, validate_codes
 from .regions import resolve
 from .sources import companyinfo as companyinfo_src
@@ -305,6 +305,40 @@ async def _run_company(cards: list, emit: Emit, limit: int = 10) -> None:
                 "found": sum(1 for c in top if c.inn)})
 
 
+async def _find_sites_for(cards: list, emit: Emit, limit: int = 8) -> None:
+    """Сайт-поиск для карточек из ЕГРЮЛ-каталога без домена (кейс МАРИТАЙМ ГРУП:
+    «сайт не обнаружен», хотя гуглится первой строкой).
+
+    Кого ищем: карточки с юрлицом/выручкой (реальные компании), но без сайта.
+    Как: одна Яндекс-выдача по «"<юрлицо>" официальный сайт» — первый
+    не-блэклистовый домен становится сайтом компании.
+    """
+    from .merge import domain_key, is_blacklisted
+    candidates = [c for c in cards if c.legal_name and not c.domain and not c.site]
+    candidates.sort(key=lambda c: c.relevance, reverse=True)
+    for c in candidates[:limit]:
+        try:
+            hits = await serp_src.fetch_serp(
+                [f'"{c.legal_name}" официальный сайт'.replace("«", "").replace("»", "")],
+                lr=225, top=5)
+            for h in hits:
+                d = domain_key(h.url)
+                if not d or is_blacklisted(d):
+                    continue
+                # «официальный сайт» от прямого вхождения имени в сниппете
+                if c.legal_name.lower().replace('"', '').replace('«', '').replace('»', '') \
+                        not in (h.title + h.snippet).lower():
+                    continue
+                c.domain = d
+                c.site = h.url
+                c.sources["сайт"] = f"найден поиском по названию юрлица: {d}"
+                await emit({"type": "stage", "stage": "enrich", "status": "run",
+                            "message": f"сайт для {c.legal_name}: {d}"})
+                break
+        except Exception as exc:
+            logger.debug("find site for %s failed: %s", c.legal_name, exc)
+
+
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
     """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков + реестр."""
     s = get_settings()
@@ -340,10 +374,13 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         for c in sorted(cards, key=lambda x: x.relevance, reverse=True):
             await emit({"type": "supplier", "data": _row(c)})
 
-        # --- enrich: только карточки из SERP без контактов ---
+        # --- юрлица без сайта (ЕГРЮЛ-каталог) — ищем сайт по названию ---
+        await _find_sites_for(cards, emit)
+
+        # --- enrich: карточки без контактов, включая каталоговые с найденным сайтом ---
         await emit({"type": "stage", "stage": "enrich", "status": "start"})
         to_enrich = [c for c in cards
-                     if c.domain and c.enrichment_status == "pending"
+                     if c.site and c.enrichment_status == "pending"
                      and not (c.emails and c.phones)]
         to_enrich = sorted(to_enrich, key=lambda x: x.relevance, reverse=True)[:s.enrich_max_sites]
 
@@ -368,6 +405,19 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
 
         # --- юрлица: dadata/checko + опыт 44-ФЗ по ИНН ---
         await _run_company(cards, emit)
+
+        # --- гео-несовпадение: поставщик из другого города при поиске
+        #     по городу федерального значения — минус к рейтингу + заметка ---
+        from .merge import region_ok as _region_ok
+        geo_mismatches = 0
+        for c in cards:
+            if not _region_ok(c.city, region_name):
+                c.relevance = max(0, c.relevance - 15)
+                c.sources["гео"] = f"{c.city} — вне региона запроса ({region_name})"
+                geo_mismatches += 1
+        if geo_mismatches:
+            await emit({"type": "stage", "stage": "company", "status": "run",
+                        "message": f"гео-несовпадений: {geo_mismatches} (пессимизированы)"})
 
         # --- неактивные юрлица (ликвидированы/в процессе) — НЕ показываем:
         # поставки от мёртвой компании невозможны, нет смысла в выборке ---

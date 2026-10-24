@@ -32,7 +32,8 @@ FETCH_TIMEOUT = httpx.Timeout(15, connect=8)
 HTML_TRIM = 6000          # столько текста достаточно LLM для вердикта
 PAGE_LIMIT = 1_500_000       # не тянем гигантские страницы (мегабайт — потолок)
 
-RE_PHONE = re.compile(r"(?:\+7|8)[\s(-]?\d{3}[\s)-]?[\d\s(-]{7,12}\d")
+RE_PHONE = re.compile(
+    r"(?:\+7|8)[\s(-]{0,3}\d{3}[\s)-]{0,3}\d{3}[\s-]{0,2}\d{2}[\s-]{0,2}\d{2}\b")
 RE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,6}")
 RE_PRICE = re.compile(
     r"(?:от\s*)?(\d[\d\s.,]{1,9})\s*(?:₽|руб\.?|RUB)\s*(?:[/за]\s*([а-яёa-z²³.]{1,10}))?",
@@ -49,11 +50,17 @@ RE_DELIVERY = re.compile(
 BAD_EMAIL_DOMAINS = {"sentry.io", "example.com", "wixpress.com", "yandex.ru"}
 
 
-def _clean_phone(raw: str) -> str:
+def _clean_phone(raw: str) -> str | None:
+    """Форматирует телефон, отбраковывая мусор (кейс: «8 2017 2016 2015»).
+
+    Валидность: ровно 11 цифр, начиная с 7/8 (федеральный формат РФ),
+    либо 10 цифр. Год-последовательности и обрывки отбрасываются."""
     digits = re.sub(r"\D", "", raw)
     if len(digits) == 11 and digits[0] in "78":
         return f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
-    return raw.strip()
+    if len(digits) == 10:
+        return f"+7 ({digits[:3]}) {digits[3:6]}-{digits[6:8]}-{digits[8:]}"
+    return None
 
 
 def _text_of(html: str) -> str:
@@ -79,7 +86,7 @@ def _main_text(html: str) -> str:
 class SiteFacts:
     url: str
     ok: bool = False
-    phones: list[str] = field(default_factory=list)
+    phones: list[str] = field(default_factory=list)  # валидированные: 11 цифр от 7/8
     emails: list[str] = field(default_factory=list)
     prices: list[str] = field(default_factory=list)      # «чипсы 43 руб/шт» — по предмету запроса
     min_order: str | None = None
@@ -136,7 +143,7 @@ async def fetch_html(url: str) -> str:
 def regex_facts(url: str, text: str) -> SiteFacts:
     """Детерминированный слой: бесплатно, покрывает ~70% случаев."""
     f = SiteFacts(url=url, ok=bool(text))
-    f.phones = [_clean_phone(m) for m in RE_PHONE.findall(text)[:5]]
+    f.phones = [p for m in RE_PHONE.findall(text)[:5] if (p := _clean_phone(m))][:3]
     emails = []
     for e in RE_EMAIL.findall(text):
         if e.split("@")[-1].lower() not in BAD_EMAIL_DOMAINS and e.lower() not in emails:
@@ -190,8 +197,11 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
 ВАЖНО:
 1. В price_examples включай цены только на "{query}" или его прямые
    варианты. Цены на другие товары, услуги, доставку — НЕ включай.
-2. wholesale=false если сайт продаёт только в розницу частным лицам
-   (нет признаков опта, МOQ, прайса для юрлиц).
+2. wholesale=true если сайт работает с оптом: признаки — «опт», «мелкий
+   опт», прайс для юрлиц, минимальная партия, а ТАКЖЕ оптовая упаковка:
+   «Коробка: 8,00 кг», «ящик 20 шт», «упаковка 10 кг» и т.п. — фасовка
+   ящиками/коробками от 3 кг это опт или мелкий опт.
+3. wholesale=false только если явная розница частным лицам без оптовых признаков.
 
 Текст сайта (обрезан):
 {text[:HTML_TRIM]}"""

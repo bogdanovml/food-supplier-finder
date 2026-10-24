@@ -204,22 +204,31 @@ async def search_gov_suppliers(query: str, *, region_code: int | None,
 
 
 async def contracts_by_inn(inn: str, *, limit: int = 5) -> dict:
-    """Краткая стата ВСЕХ контрактов поставщика по ИНН (вне зависимости от товара).
+    """Краткая стата контрактов поставщика по ИНН: 44-ФЗ + 223-ФЗ.
 
-    Используется на этапе юрлица: когда узнали ИНН с сайта/checko,
-    можно проверить полный опыт поставщика в 44-ФЗ, а не только по теме запроса.
+    223-ФЗ: в индексе Госплана поле suppliers пустое (проверено живыми
+    запросами — атрибуция не отдаётся), но параметр supplier=<ИНН>
+    фильтрует корректно. Поэтому 223-опыт проверяем по ИНН на стадии
+    юрлица, а в предметном поиске — только 44-ФЗ.
     """
-    async with _client() as client:
-        data = await _get(client, "/fz44/contracts",
-                          {"supplier": inn, "stage": "EC", "limit": limit,
-                           "sort": "price_desc"})
-    if data is None:
-        return {"count": 0, "value": 0.0, "example": None}
-    items = data if isinstance(data, list) else []
-    total = sum(float(i.get("price") or 0) for i in items)
+    total_count = 0
+    total_value = 0.0
     example = None
-    if items:
-        example = {"reg_num": items[0].get("reg_num"),
-                   "price": float(items[0].get("price") or 0),
-                   "subject": items[0].get("subject")}
-    return {"count": len(items), "value": total, "example": example}
+    async with _client() as client:
+        for source, params in (("fz44", {"supplier": inn, "stage": "EC",
+                                          "limit": limit, "sort": "price_desc"}),
+                                ("fz223", {"supplier": inn, "limit": limit,
+                                           "sort": "price_desc"})):
+            data = await _get(client, f"/{source}/contracts", params)
+            if data is None:
+                continue
+            items = data if isinstance(data, list) else []
+            total_count += len(items)
+            total_value += sum(float(i.get("price") or 0) for i in items)
+            if not example and items:
+                i = items[0]
+                example = {"reg_num": i.get("reg_num"),
+                           "price": float(i.get("price") or 0),
+                           "subject": i.get("subject"),
+                           "source": source}
+    return {"count": total_count, "value": total_value, "example": example}
