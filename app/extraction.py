@@ -24,6 +24,7 @@ from trafilatura import extract as traf_extract
 from .config import get_settings
 from .llm import ask_json, LLMError
 from .renderer import render_html, THIN_TEXT_THRESHOLD
+from .sources.companyinfo import extract_legal_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ class SiteFacts:
     kind: str | None = None                              # производитель/дистрибьютор/магазин
     wholesale: bool | None = None                        # LLM: работает ли с оптом
     rendered: bool = False                               # потребовался ли JS-рендер
+    inn: str | None = None                                # юрлицо с сайта (футер/реквизиты)
+    ogrn: str | None = None
+    legal_name: str | None = None
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -255,6 +259,12 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             full_text = _text_of(html)
             facts = regex_facts(url, full_text)
             facts.rendered = True
+
+    # --- юрлицо с сайта: футер/«Реквизиты» (после рендера — на итоговом тексте) ---
+    legal = extract_legal_from_text(full_text)
+    facts.inn = legal.get("inn")
+    facts.ogrn = legal.get("ogrn")
+    facts.legal_name = legal.get("legal_name")
 
     # --- нет email -> типовые страницы контактов ---
     if not facts.emails:

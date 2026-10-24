@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, Callable
 
@@ -27,6 +28,8 @@ from .llm import ask_json, LLMError
 from .merge import merge_all, apply_enrichment
 from .okpd import suggest_codes, validate_codes
 from .regions import resolve
+from .sources import companyinfo as companyinfo_src
+from .sources import directory as directory_src
 from .sources import gosplan as gosplan_src
 from .sources import optlist as optlist_src
 from .sources import xmlstock as serp_src
@@ -36,29 +39,34 @@ logger = logging.getLogger(__name__)
 Event = dict[str, Any]
 Emit = Callable[[Event], None]
 
-STAGES = ["plan", "serp", "optlist", "gosplan", "merge", "enrich", "structure", "done"]
+STAGES = ["plan", "serp", "optlist", "gosplan", "directory", "merge",
+          "enrich", "company", "structure", "done"]
 
 
-async def _plan_queries(query: str, emit: Emit) -> tuple[list[str], list[str]]:
-    """LLM строит поисковые запросы + предлагает ОКПД2-коды категории товара.
+async def _plan_queries(query: str, emit: Emit) -> tuple[list[str], list[str], list[str]]:
+    """LLM строит поисковые запросы + ОКПД2 (госконтракты) + ОКВЭД (ЕГРЮЛ-каталог).
 
-    Коды валидируются по справочнику (анти-галлюцинация) и дополняются
-    fuzzy-матчингом названия по справочнику.
-    """
+    ОКПД2 валидируется по справочнику; ОКВЭД самовалидируется каталогом
+    (страница без компаний = код не существует)."""
     await emit({"type": "stage", "stage": "plan", "status": "start"})
     queries: list[str] = []
     codes_raw: list[str] = []
+    okved_raw: list[str] = []
     try:
         data = await ask_json(
             f'Товар: "{query}". '
             f'1) Составь 2-3 поисковых запроса для Яндекса, чтобы найти ОПТОВЫХ '
             f'поставщиков/производителей этого товара в России. '
             f'2) Назови 1-3 кода ОКПД2 (российский классификатор продукции), '
-            f'к которым относится этот товар (например, мука -> 10.61.21). '
-            f'Ответь JSON: {{"queries": ["..."], "okpd2": ["10.xx.xx"]}}',
-            smart=True, temperature=0.2, max_tokens=400)
+            f'к которым относится товар (мука -> 10.61.21). '
+            f'3) Назови 1-2 кода ОКВЭД2 (классификатор видов деятельности), '
+            f'подходящих для ПРОИЗВОДСТВА или ОПТОВОЙ ТОРГОВЛИ этим товаром '
+            f'(производство муки -> 10.61, оптовая торговля мукой -> 46.21). '
+            f'Ответь JSON: {{"queries": ["..."], "okpd2": ["10.xx"], "okved2": ["10.xx"]}}',
+            smart=True, temperature=0.2, max_tokens=500)
         queries = [q for q in data.get("queries", []) if isinstance(q, str) and len(q) > 3][:3]
         codes_raw = [str(c).strip() for c in data.get("okpd2", []) if c][:3]
+        okved_raw = [str(c).strip() for c in data.get("okved2", []) if c][:2]
     except LLMError:
         pass
     queries = queries or [f"{query} оптом", f"{query} производитель купить"]
@@ -68,10 +76,11 @@ async def _plan_queries(query: str, emit: Emit) -> tuple[list[str], list[str]]:
         if c not in codes:
             codes.append(c)
     codes = codes[:3]
+    okved = [c for c in okved_raw if re.match(r"^\d{2}\.\d{2}", c)][:2]
 
     await emit({"type": "stage", "stage": "plan", "status": "done", "found": len(queries),
-                "message": f"Запросы: {'; '.join(queries)}. ОКПД2: {', '.join(codes) or '—'}"})
-    return queries, codes
+                "message": f"Запросы: {'; '.join(queries)}. ОКПД2: {', '.join(codes) or '—'}. ОКВЭД: {', '.join(okved) or '—'}"})
+    return queries, codes, okved
 
 
 async def _run_serp(queries: list[str], lr: int, emit: Emit) -> list:
@@ -101,6 +110,29 @@ async def _run_optlist(query: str, emit: Emit) -> list:
         logger.warning("optlist stage failed: %s", exc)
         await emit({"type": "stage", "stage": "optlist", "status": "skipped",
                     "message": f"optlist пропущен: {exc}"})
+        return []
+
+
+async def _run_directory(okved_codes: list[str], region_name: str, emit: Emit) -> list:
+    await emit({"type": "stage", "stage": "directory", "status": "start",
+                "message": f"ЕГРЮЛ-каталог по ОКВЭД: {', '.join(okved_codes) or '—'} "
+                           f"(действующие юрлица отрасли, фильтр: {region_name})"})
+    if not okved_codes:
+        await emit({"type": "stage", "stage": "directory", "status": "skipped",
+                    "message": "LLM не предложил ОКВЭД-кодов"})
+        return []
+    try:
+        hits = await directory_src.search_okved_directory(
+            okved_codes, region_name=region_name, max_per_code=100)
+        status = "done" if hits else "skipped"
+        await emit({"type": "stage", "stage": "directory", "status": status,
+                    "found": len(hits),
+                    "message": "" if hits else "по кодам/региону ничего не найдено"})
+        return hits
+    except Exception as exc:
+        logger.warning("directory stage failed: %s", exc)
+        await emit({"type": "stage", "stage": "directory", "status": "skipped",
+                    "message": f"каталог ОКВЭД пропущен: {exc}"})
         return []
 
 
@@ -197,9 +229,71 @@ def _pessimize_thin(cards) -> None:
     с реальными ценами и контактами."""
     for c in cards:
         useful = (c.emails or c.phones or c.price_min or c.gov_contracts_count
-                  or c.min_order or c.certificates)
+                  or c.min_order or c.certificates or c.inn or c.revenue_note)
         if not useful and c.enrichment_status != "done":
             c.relevance = min(c.relevance, 10)
+
+
+def _pessimize_all(cards) -> None:
+    _pessimize_thin(cards)
+
+
+async def _run_company(cards: list, emit: Emit, limit: int = 10) -> None:
+    """Юрлица: dadata/checko по ИНН/ОГРН/названию + полный опыт 44-ФЗ по ИНН."""
+    await emit({"type": "stage", "stage": "company", "status": "start",
+                "message": "Проверка юрлиц через ЕГРЮЛ (DaData) и опыт 44-ФЗ по ИНН"})
+    top = sorted(cards, key=lambda c: c.relevance, reverse=True)[:limit]
+    for c in top:
+        try:
+            info = None
+            if c.inn and not c.legal_name:
+                info = await companyinfo_src.by_inn(c.inn)
+            elif c.ogrn and not c.inn:
+                info = await companyinfo_src.by_inn(c.ogrn)   # dadata находит и по ОГРН
+                if info:
+                    c.inn = info.inn
+                    c.sources["ИНН"] = f"ЕГРЮЛ: найден по ОГРН {c.ogrn}"
+            elif not c.inn and not c.ogrn:
+                info = await companyinfo_src.by_name(c.name)
+            if info and info.inn:
+                if not c.inn:
+                    c.inn = info.inn
+                if not c.legal_name and info.legal_name:
+                    c.legal_name = info.legal_name
+                if not c.ogrn and info.ogrn:
+                    c.ogrn = info.ogrn
+                if not c.director and info.director:
+                    c.director = info.director
+                if not c.okved and info.okved:
+                    c.okved = info.okved
+                if not c.reg_date and info.reg_date:
+                    c.reg_date = info.reg_date
+                if not c.company_status and info.status:
+                    c.company_status = info.status
+                if not c.staff and info.staff:
+                    c.staff = info.staff
+                src = (info.source_url or "").split("/")[2] if info.source_url else "ЕГРЮЛ"
+                c.sources["юрлицо"] = f"ЕГРЮЛ ({src}): {info.legal_name or c.name}"
+                if info.status and info.status != "Действующая":
+                    c.relevance = max(0, c.relevance - 20)   # ликвидируемся — не кандидат
+            # узнав ИНН — проверяем полный опыт 44-ФЗ
+            if c.inn and c.gov_contracts_count == 0:
+                stat = await gosplan_src.contracts_by_inn(c.inn, limit=5)
+                if stat["count"]:
+                    c.gov_contracts_count = stat["count"]
+                    c.gov_contracts_value = stat["value"]
+                    ex = stat.get("example") or {}
+                    if ex:
+                        c.gov_contract_examples = [ex]
+                    c.sources["опта 44-ФЗ"] = (
+                        f"поставщик {stat['count']} контрактов 44-ФЗ "
+                        f"на {stat['value']:,.0f} ₽ (поиск по ИНН)")
+                    c.relevance = min(100, c.relevance + 10)
+            await emit({"type": "supplier", "data": _row(c)})
+        except Exception as exc:
+            logger.debug("company stage card %s failed: %s", c.name, exc)
+    await emit({"type": "stage", "stage": "company", "status": "done",
+                "found": sum(1 for c in top if c.inn)})
 
 
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
@@ -211,22 +305,25 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
     t0 = time.monotonic()
 
     try:
-        queries, codes = await _plan_queries(query, emit)
+        queries, codes, okved = await _plan_queries(query, emit)
 
         await emit({"type": "stage", "stage": "merge", "status": "pending"})
-        # три источника параллельно
-        serp_hits, opt_hits, gov_sup = await asyncio.gather(
+        # четыре источника параллельно
+        serp_hits, opt_hits, gov_sup, dir_hits = await asyncio.gather(
             _run_serp(queries, lr, emit),
             _run_optlist(query, emit),
             _run_gosplan(query, gos_region, codes, emit),
+            _run_directory(okved, region_name, emit),
         )
         stats["serp"] = len(serp_hits)
         stats["optlist"] = len(opt_hits)
         stats["gosplan"] = len(gov_sup)
+        stats["directory"] = len(dir_hits)
 
         # --- merge ---
         await emit({"type": "stage", "stage": "merge", "status": "start"})
-        cards = merge_all(serp_hits, opt_hits, gov_sup, region_name)
+        cards = merge_all(serp_hits, opt_hits, gov_sup, dir_hits, region_name)
+        _pessimize_all(cards)
         await emit({"type": "stage", "stage": "merge", "status": "done", "found": len(cards)})
 
         # карточки сразу в UI (enrichment_status=pending)
@@ -259,6 +356,10 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         _pessimize_thin(cards)
         await emit({"type": "stage", "stage": "enrich", "status": "done",
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
+
+        # --- юрлица: dadata/checko + опыт 44-ФЗ по ИНН ---
+        await _run_company(cards, emit)
+        _pessimize_all(cards)
 
         # --- structure + финальные карточки ---
         await _structure_reasons(cards, query, emit)

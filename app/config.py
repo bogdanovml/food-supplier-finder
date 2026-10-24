@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # Госконтракты (Госплан API)
     gosplan_base_url: str = ""
 
+    # DaData (ЕГРЮЛ-справочник, структурированный API)
+    dadata_api_key: str = ""
+    dadata_secret: str = ""
+
     # SMTP (RFQ-рассылка)
     smtp_host: str = ""
     smtp_port: int = 587

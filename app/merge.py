@@ -21,6 +21,7 @@ from typing import Any
 import tldextract
 from rapidfuzz import fuzz
 from .extraction import normalize_price
+from .sources.directory import DirectoryHit
 from .sources.gosplan import GovSupplier
 from .sources.optlist import OptlistHit
 from .sources.xmlstock import SerpHit
@@ -96,6 +97,14 @@ class SupplierCard:
     domain: str = ""
     site: str = ""
     inn: str | None = None
+    legal_name: str | None = None
+    ogrn: str | None = None
+    director: str | None = None
+    okved: str | None = None
+    reg_date: str | None = None
+    company_status: str | None = None
+    staff: str | None = None
+    revenue_note: str | None = None
     city: str = ""
     region: str = ""
     phones: list[str] = field(default_factory=list)
@@ -122,6 +131,10 @@ class SupplierCard:
     def to_row(self) -> dict:
         return {
             "name": self.name, "domain": self.domain, "site": self.site, "inn": self.inn,
+            "legal_name": self.legal_name, "ogrn": self.ogrn, "director": self.director,
+            "okved": self.okved, "reg_date": self.reg_date,
+            "company_status": self.company_status, "staff": self.staff,
+            "revenue_note": self.revenue_note,
             "city": self.city, "region": self.region, "phones": self.phones,
             "emails": self.emails, "description": self.description,
             "categories": self.categories, "price_min": self.price_min,
@@ -138,8 +151,8 @@ class SupplierCard:
 
 
 def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSupplier],
-              region_name: str) -> list[SupplierCard]:
-    """Слияние трёх источников в список карточек."""
+              directory: list[DirectoryHit], region_name: str) -> list[SupplierCard]:
+    """Слияние четырёх источников в список карточек."""
     cards: list[SupplierCard] = []
 
     # --- 1. госконтракты: самый сильный источник (реальные сделки) ---
@@ -196,7 +209,30 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSuppl
             card.sources["документы"] = "optlist.ru: документы проверены"
         cards.append(card)
 
-    # --- 3. SERP: органический поиск, merge по домену с уже созданными ---
+    # --- 3. каталог ЕГРЮЛ по ОКВЭД (checko): действующие юрлица отрасли ---
+    for dh in directory:
+        target = None
+        best_score = 0.0
+        for c in cards:
+            score = fuzz.token_sort_ratio(dh.name.lower(), c.name.lower())
+            if score > best_score:
+                target, best_score = c, score
+        if target is not None and best_score >= 93:
+            _absorb_directory(target, dh)
+            continue
+        card = SupplierCard(
+            name=dh.name, inn=None, ogrn=dh.ogrn,
+            city=dh.city or _clean_city(dh.address), region=region_name,
+            director=dh.director or None, reg_date=dh.reg_date or None,
+            revenue_note=dh.revenue or None,
+            description=dh.address,
+            sources={"юрлицо, адрес, выручка": f"ЕГРЮЛ: каталог checko.ru, ОКВЭД {dh.okved_code}, ОГРН {dh.ogrn}"},
+        )
+        if dh.revenue:
+            card.sources["выручка"] = f"checko.ru/ЕГРЮЛ: {dh.revenue}"
+        cards.append(card)
+
+    # --- 4. SERP: органический поиск, merge по домену с уже созданными ---
     have_domains = {c.domain for c in cards if c.domain}
     for hit in serp:
         d = domain_key(hit.url)
@@ -215,6 +251,19 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSuppl
 
     _score_all(cards, serp)
     return cards
+
+
+def _absorb_directory(card: SupplierCard, dh: DirectoryHit) -> None:
+    """Данные ЕГРЮЛ-каталога дополняют карточку (мерж по fuzzy-имени)."""
+    if not card.ogrn:
+        card.ogrn = dh.ogrn
+    if not card.director and dh.director:
+        card.director = dh.director
+    if not card.reg_date and dh.reg_date:
+        card.reg_date = dh.reg_date
+    if not card.revenue_note and dh.revenue:
+        card.revenue_note = dh.revenue
+    card.sources["юрлицо"] = f"ЕГРЮЛ: каталог checko.ru (ОКВЭД {dh.okved_code})"
 
 
 def _absorb_optlist(card: SupplierCard, oh: OptlistHit) -> None:
@@ -264,6 +313,11 @@ def _score_all(cards: list[SupplierCard], serp: list[SerpHit]) -> None:
             score += 30 + min(5 * c.gov_contracts_count, 10)
         if "optlist.ru" in str(c.sources.values()):
             score += 15
+        if "ЕГРЮЛ" in str(c.sources.values()):
+            score += 10                                   # подтверждённое действующее юрлицо отрасли
+            if c.revenue_note and ("млрд" in c.revenue_note
+                                   or "млн" in c.revenue_note):
+                score += 5                                # небитый оборот
         pos = pos_by_domain.get(c.domain)
         if pos:
             score += 15 if pos <= 5 else (10 if pos <= 10 else 5)
@@ -302,6 +356,14 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
         card.relevance = max(0, card.relevance - 15)
     elif facts.wholesale and facts.kind in ("производитель", "дистрибьютор"):
         card.relevance = min(100, card.relevance + 5)
+
+    # --- юрлицо с сайта (футер/реквизиты) ---
+    if facts.inn and not card.inn:
+        card.inn = facts.inn
+        card.sources["ИНН"] = f"сайт {facts.url} (реквизиты)"
+    if facts.legal_name and not getattr(card, "legal_name", None):
+        card.legal_name = facts.legal_name
+        card.sources["юрлицо"] = f"сайт {facts.url} (реквизиты)"
 
     new_phones = [p for p in facts.phones if p not in card.phones]
     card.phones.extend(new_phones[:2])

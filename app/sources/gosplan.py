@@ -201,3 +201,25 @@ async def search_gov_suppliers(query: str, *, region_code: int | None,
     result = list(suppliers.values())
     result.sort(key=lambda g: g.total_value, reverse=True)
     return result
+
+
+async def contracts_by_inn(inn: str, *, limit: int = 5) -> dict:
+    """Краткая стата ВСЕХ контрактов поставщика по ИНН (вне зависимости от товара).
+
+    Используется на этапе юрлица: когда узнали ИНН с сайта/checko,
+    можно проверить полный опыт поставщика в 44-ФЗ, а не только по теме запроса.
+    """
+    async with _client() as client:
+        data = await _get(client, "/fz44/contracts",
+                          {"supplier": inn, "stage": "EC", "limit": limit,
+                           "sort": "price_desc"})
+    if data is None:
+        return {"count": 0, "value": 0.0, "example": None}
+    items = data if isinstance(data, list) else []
+    total = sum(float(i.get("price") or 0) for i in items)
+    example = None
+    if items:
+        example = {"reg_num": items[0].get("reg_num"),
+                   "price": float(items[0].get("price") or 0),
+                   "subject": items[0].get("subject")}
+    return {"count": len(items), "value": total, "example": example}

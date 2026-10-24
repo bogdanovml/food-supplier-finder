@@ -4,14 +4,16 @@
 "use strict";
 
 const STAGES_CONFIG = {
-  plan:      { num: "01", name: "План запросов", note: "Генерация целевых поисковых запросов" },
+  plan:      { num: "01", name: "План запросов", note: "Запросы + ОКПД2 + ОКВЭД для ЕГРЮЛ" },
   serp:      { num: "02", name: "Поисковые системы", note: "Яндекс и Google XML по региону" },
   optlist:   { num: "03", name: "Каталог optlist.ru", note: "Сбор профильных компаний и карточек" },
-  gosplan:   { num: "04", name: "Госконтракты 44-ФЗ", note: "Исполненные контракты и цены" },
-  merge:     { num: "05", name: "Слияние и дедуп", note: "Матчинг по ИНН, доменам и названиям" },
-  enrich:    { num: "06", name: "Обогащение сайтов", note: "Парсинг контактов, цен, ГОСТ/ХАССП" },
-  structure: { num: "07", name: "Оценка релевантности", note: "Формирование обоснования выбора" },
-  done:      { num: "08", name: "Готовность", note: "Фиксация результатов в аналитической БД" }
+  gosplan:   { num: "04", name: "Госконтракты 44-ФЗ", note: "Исполненные контракты по ОКПД2" },
+  directory: { num: "05", name: "Реестр юрлиц (ОКВЭД)", note: "Каталог ЕГРЮЛ по отрасли: адрес, директор, выручка" },
+  merge:     { num: "06", name: "Слияние и дедуп", note: "Матчинг по ИНН, ОГРН, доменам и названиям" },
+  enrich:    { num: "07", name: "Обогащение сайтов", note: "Парсинг контактов, цен, ГОСТ/ХАССП" },
+  company:   { num: "08", name: "Проверка юрлиц", note: "ЕГРЮЛ через DaData + опыт 44-ФЗ по ИНН" },
+  structure: { num: "09", name: "Оценка релевантности", note: "Формирование обоснования выбора" },
+  done:      { num: "10", name: "Готовность", note: "Фиксация результатов в аналитической БД" }
 };
 
 const WORKFLOW_STATUSES = {
@@ -351,13 +353,16 @@ function buildTable() {
         headerSort: true,
         formatter: (cell) => {
           const d = cell.getData();
+          const srcValues = Object.values(d.sources || {}).join(" ");
           let sourceBadge = "";
           if (d.gov_contracts_count > 0) {
-            sourceBadge = '<span class="badge badge-source badge-source-gov">44-ФЗ</span>';
+            sourceBadge = '<span class="badge badge-source badge-source-gov" title="Найден через реестр исполненных контрактов 44-ФЗ: подтверждённые поставки госзаказчикам">Госзакупки 44-ФЗ</span>';
           } else if (d.site && d.site.includes("optlist.ru")) {
-            sourceBadge = '<span class="badge badge-source badge-source-catalog">Каталог</span>';
+            sourceBadge = '<span class="badge badge-source badge-source-catalog" title="Поставщик из B2B-каталога оптовиков optlist.ru">Каталог optlist</span>';
+          } else if (srcValues.includes("ЕГРЮЛ")) {
+            sourceBadge = '<span class="badge badge-source badge-source-okved" title="Действующее юрлицо отрасли из реестра ЕГРЮЛ по ОКВЭД: адрес, директор, выручка">Реестр ОКВЭД</span>';
           } else {
-            sourceBadge = '<span class="badge badge-source badge-source-serp">Органика</span>';
+            sourceBadge = '<span class="badge badge-source badge-source-serp" title="Сайт компании найден через региональный поиск (Яндекс/Google); данные обогащены обходом сайта">Поиск (сайт)</span>';
           }
           const innSub = d.inn ? `<span class="text-muted small ms-1">(ИНН ${escapeHtml(d.inn)})</span>` : "";
           return `<div><div class="fw-semibold text-dark">${sourceBadge} ${escapeHtml(d.name)}</div>${innSub ? '<div style="font-size:11px">' + innSub + '</div>' : ''}</div>`;
@@ -569,15 +574,50 @@ async function openDossier(row) {
 
     <!-- Corporate info -->
     <div class="dossier-section">
-      <div class="dossier-section-title">Реквизиты и локация</div>
+      <div class="dossier-section-title">Юридическое лицо (ЕГРЮЛ)</div>
       <div class="dossier-row">
-        <span class="dossier-row-label">Юридическое лицо</span>
-        <span class="dossier-row-value">${escapeHtml(supplier.name)}</span>
+        <span class="dossier-row-label">Наименование</span>
+        <span class="dossier-row-value">${escapeHtml(supplier.legal_name || supplier.name)}</span>
       </div>
       ${supplier.inn ? `
       <div class="dossier-row">
         <span class="dossier-row-label">ИНН</span>
         <span class="dossier-row-value font-monospace">${escapeHtml(supplier.inn)}</span>
+      </div>` : ""}
+      ${supplier.ogrn ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">ОГРН</span>
+        <span class="dossier-row-value font-monospace">${escapeHtml(supplier.ogrn)}</span>
+      </div>` : ""}
+      ${supplier.director ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Руководитель</span>
+        <span class="dossier-row-value">${escapeHtml(supplier.director)}</span>
+      </div>` : ""}
+      ${supplier.okved ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">ОКВЭД</span>
+        <span class="dossier-row-value">${escapeHtml(String(supplier.okved).slice(0, 90))}</span>
+      </div>` : ""}
+      ${supplier.reg_date ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Дата регистрации</span>
+        <span class="dossier-row-value">${escapeHtml(supplier.reg_date)}</span>
+      </div>` : ""}
+      ${supplier.company_status ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Статус</span>
+        <span class="dossier-row-value">${supplier.company_status === "Действующая" ? '<span class="text-success fw-semibold">Действующая</span>' : `<span class="text-danger fw-semibold">${escapeHtml(supplier.company_status)}</span>`}</span>
+      </div>` : ""}
+      ${supplier.revenue_note ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Выручка</span>
+        <span class="dossier-row-value fw-semibold">${escapeHtml(supplier.revenue_note)}</span>
+      </div>` : ""}
+      ${supplier.staff ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Штат</span>
+        <span class="dossier-row-value">${escapeHtml(supplier.staff)} чел.</span>
       </div>` : ""}
       <div class="dossier-row">
         <span class="dossier-row-label">Регион / Город</span>
