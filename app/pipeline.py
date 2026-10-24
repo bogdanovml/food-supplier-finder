@@ -238,11 +238,17 @@ def _pessimize_all(cards) -> None:
     _pessimize_thin(cards)
 
 
-async def _run_company(cards: list, emit: Emit, limit: int = 10) -> None:
-    """Юрлица: dadata/checko по ИНН/ОГРН/названию + полный опыт 44-ФЗ по ИНН."""
+async def _run_company(cards: list, emit: Emit, limit: int = 14) -> None:
+    """Юрлица: dadata/checko по ИНН/ОГРН/названию + полный опыт 44/223-ФЗ.
+
+    Приоритет проверки — карточки с известным ИНН (быстрая валидация ЕГРЮЛ),
+    затем остальные по рейтингу."""
     await emit({"type": "stage", "stage": "company", "status": "start",
-                "message": "Проверка юрлиц через ЕГРЮЛ (DaData) и опыт 44-ФЗ по ИНН"})
-    top = sorted(cards, key=lambda c: c.relevance, reverse=True)[:limit]
+                "message": "Проверка юрлиц через ЕГРЮЛ (DaData) и опыт 44/223-ФЗ по ИНН"})
+    with_inn = [c for c in cards if c.inn]
+    rest = [c for c in cards if not c.inn]
+    rest.sort(key=lambda c: c.relevance, reverse=True)
+    top = (with_inn + rest)[:limit]
     for c in top:
         try:
             info = None
@@ -314,29 +320,29 @@ async def _find_sites_for(cards: list, emit: Emit, limit: int = 8) -> None:
     не-блэклистовый домен становится сайтом компании.
     """
     from .merge import domain_key, is_blacklisted
-    candidates = [c for c in cards if c.legal_name and not c.domain and not c.site]
+    candidates = [c for c in cards if (c.legal_name or c.name) and not c.domain and not c.site]
     candidates.sort(key=lambda c: c.relevance, reverse=True)
     for c in candidates[:limit]:
         try:
+            legal = (c.legal_name or c.name).replace("«", " ").replace("»", " ").replace('"', " ")
+            legal = re.sub(r"\s+", " ", legal).strip()
             hits = await serp_src.fetch_serp(
-                [f'"{c.legal_name}" официальный сайт'.replace("«", "").replace("»", "")],
-                lr=225, top=5)
+                [f'{legal} официальный сайт'], lr=225, top=5)
             for h in hits:
                 d = domain_key(h.url)
                 if not d or is_blacklisted(d):
                     continue
                 # «официальный сайт» от прямого вхождения имени в сниппете
-                if c.legal_name.lower().replace('"', '').replace('«', '').replace('»', '') \
-                        not in (h.title + h.snippet).lower():
+                if legal.lower() not in (h.title + h.snippet).lower():
                     continue
                 c.domain = d
                 c.site = h.url
                 c.sources["сайт"] = f"найден поиском по названию юрлица: {d}"
                 await emit({"type": "stage", "stage": "enrich", "status": "run",
-                            "message": f"сайт для {c.legal_name}: {d}"})
+                            "message": f"сайт для {legal}: {d}"})
                 break
         except Exception as exc:
-            logger.debug("find site for %s failed: %s", c.legal_name, exc)
+            logger.debug("find site for %s failed: %s", legal, exc)
 
 
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
