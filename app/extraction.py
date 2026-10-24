@@ -93,7 +93,8 @@ class SiteFacts:
     certificates: list[str] = field(default_factory=list)
     delivery: str | None = None
     description: str | None = None
-    irrelevant: bool = False                            # LLM: сайт не про наш товар
+    match: str = ""                                     # LLM: profile|adjacent|offtopic
+    irrelevant: bool = False                            # вычисляется: match == offtopic
     method: str = "regex"                               # regex | llm | failed
     kind: str | None = None                              # производитель/дистрибьютор/магазин
     wholesale: bool | None = None                        # LLM: работает ли с оптом
@@ -171,6 +172,62 @@ def regex_facts(url: str, text: str) -> SiteFacts:
     return f
 
 
+
+RE_CONTACT_KW = re.compile(
+    r"(контакт|телефон|тел\.|почт|email|e-mail|связать|позвон|адрес\b|офис|"
+    r"whatsapp|telegram|вайбер|мессендж|график работы)", re.IGNORECASE)
+
+
+def contact_text(full_text: str, limit: int = 8000) -> str:
+    """Текст, пригодный для извлечения контактов LLM.
+
+    trafilatura (main content) срезает футер — а у российских B2B-сайтов
+    контакты живут именно там. Берём окна вокруг контакт-ключевых слов
+    плюс хвост страницы (футер) — то, что regex-ям мешает, а гемме нет."""
+    if len(full_text) <= limit:
+        return full_text
+    windows: list[str] = []
+    for m in RE_CONTACT_KW.finditer(full_text):
+        lo = max(0, m.start() - 500)
+        hi = min(len(full_text), m.end() + 700)
+        if windows and lo <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], hi)  # слить пересекающиеся окна
+        else:
+            windows.append((lo, hi))
+    slices = [full_text[lo:hi] for lo, hi in windows]
+    tail = full_text[-2500:]  # футер
+    out = "\n...\n".join(slices) + "\n...\n" + tail
+    return out[:limit]
+
+
+
+async def llm_contacts(url: str, text: str) -> SiteFacts:
+    """Контакты через дешёвую модель (gemma): regex не тянет по вариативности
+    футеров, а gemini получает только очищенный main content без футера."""
+    f = SiteFacts(url=url, method="llm-contacts")
+    if len(text) < 60:
+        return f
+    prompt = f"""Из текста страницы сайта компании извлеки контактные данные.
+
+Ответь СТРОГО JSON:
+{{"phones": ["телефоны в формате как на сайте"], "emails": ["email"],
+  "messengers": ["whatsapp/telegram если есть"]}}
+
+Если чего-то нет — пустой массив. Не выдумывай.
+
+Текст:
+{text[:6000]}"""
+    try:
+        data = await ask_json(prompt, smart=False, temperature=0.1, max_tokens=400)
+        f.phones = [str(x)[:25] for x in (data.get("phones") or [])][:3]
+        f.emails = [str(x).lower()[:60] for x in (data.get("emails") or [])][:2]
+        if f.phones or f.emails:
+            f.ok = True
+    except LLMError as exc:
+        logger.debug("llm_contacts failed for %s: %s", url, exc)
+    return f
+
+
 async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
     """LLM-слой: понимает контекст, отсекает нерелевантные и розничные страницы.
 
@@ -183,7 +240,7 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
 или близким товаром, и извлеки данные.
 
 Ответь JSON:
-{{"relevant": true/false,
+{{"match": "profile|adjacent|offtopic",
   "kind": "производитель|дистрибьютор|магазин|неясно",
   "wholesale": true/false,
   "wholesale_evidence": "признак оптовой торговли: 'опт', 'мелкий опт', прайс для юрлиц... иначе null",
@@ -193,6 +250,12 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
   "delivery": "условия доставки если указаны, иначе null",
   "certificates": ["найденные сертификаты/ГОСТы"],
   "phones": ["телефоны"], "emails": ["email"]}}
+
+Класс match:
+- "profile" — сайт ПРОДАЁТ или ПРОИЗВОДИТ именно "{query}" (или прямые варианты);
+- "adjacent" — сайт не про "{query}", но это пищевой оптовик/производsteller/дистрибьютор
+  (смежная еда, ингредиенты, упаковка) — полезный контакт для закупщика;
+- "offtopic" — не поставщик вообще (блог, услуга, частный сервис, чужая тематика).
 
 ВАЖНО:
 1. В price_examples включай цены только на "{query}" или его прямые
@@ -207,7 +270,12 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
 {text[:HTML_TRIM]}"""
     try:
         data = await ask_json(prompt, smart=True, temperature=0.1)
-        f.irrelevant = not bool(data.get("relevant", True))
+        match = str(data.get("match") or "").strip().lower()
+        f.match = match if match in ("profile", "adjacent", "offtopic") else ""
+        f.irrelevant = (f.match == "offtopic")
+        if not f.match and "relevant" in data:  # обратная совместимость формата
+            f.irrelevant = not bool(data.get("relevant", True))
+            f.match = "offtopic" if f.irrelevant else "profile"
         f.kind = (data.get("kind") or data.get("supplier_kind") or "неясно")[:20]
         f.wholesale = bool(data.get("wholesale")) if "wholesale" in data else None
         f.description = (data.get("description") or "")[:300] or None
@@ -301,6 +369,21 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             if facts.emails:
                 facts.ok = True
                 break
+
+    # --- контакты всё ещё нет: гемма по контакт-окнам (включая футер,
+    #     который trafilatura срезает) — regex не тянет вариативность ---
+    if use_llm and not (facts.emails and facts.phones):
+        ct = contact_text(full_text)
+        contact_facts = await llm_contacts(url, ct)
+        if contact_facts.ok:
+            for ph in contact_facts.phones:
+                cleaned = _clean_phone(ph)
+                if cleaned and cleaned not in facts.phones:
+                    facts.phones.append(cleaned)
+            for e in contact_facts.emails:
+                if e not in facts.emails:
+                    facts.emails.append(e)
+            facts.ok = True
 
     # --- LLM: цены строго по предмету, опт/розница, описание ---
     main_text = _main_text(html)

@@ -378,16 +378,39 @@ def _score_all(cards: list[SupplierCard], serp: list[SerpHit]) -> None:
         c.relevance = min(score, 100)
 
 
+def _apply_contact_facts(card: SupplierCard, facts) -> None:
+    """Контакты с сайта: append без перезаписи (merge = дополнение)."""
+    new_phones = [p for p in facts.phones if p not in card.phones]
+    card.phones.extend(new_phones[:2])
+    new_emails = [e for e in facts.emails if e not in card.emails]
+    card.emails.extend(new_emails[:2])
+    if card.emails or card.phones:
+        card.sources.setdefault("контакты", f"сайт {facts.url}")
+
+
 def apply_enrichment(card: SupplierCard, facts) -> None:
     """Дополнить карточку фактами с сайта + вердикты опт/розница/пустышка."""
     if not facts.ok:
         card.enrichment_status = "skipped"
         return
-    if facts.irrelevant:
-        card.enrichment_status = "irrelevant"
+    # LLM-классификация сайта (profile|adjacent|offtopic):
+    #   offtopic  — не поставщик вообще (блог/сервис/чужая тематика): -25,
+    #               но контакты сохраняем — вдруг компания реальная;
+    #   adjacent  — пищевой оптовик смежной категории: -10, карточка жива
+    #               (морозильщик мороженого в поиске рыбы — полезный контакт);
+    #   profile   — профильный поставщик.
+    if facts.match == "offtopic" or facts.irrelevant:
+        card.enrichment_status = "offtopic"
         card.relevance = max(0, card.relevance - 25)
+        _apply_contact_facts(card, facts)
         return
     card.enrichment_status = "done"
+    _apply_contact_facts(card, facts)
+    if facts.match == "adjacent":
+        card.relevance = max(0, card.relevance - 10)
+        card.sources["тип"] = f"{(facts.sources.get('тип') or '')} смежная категория".strip()
+    elif facts.match == "profile":
+        card.relevance = min(100, card.relevance + 5)
 
     # --- вердикт опт/розница (LLM) ---
     if facts.kind and facts.kind != "неясно":
@@ -407,10 +430,6 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
         card.legal_name = facts.legal_name
         card.sources["юрлицо"] = f"сайт {facts.url} (реквизиты)"
 
-    new_phones = [p for p in facts.phones if p not in card.phones]
-    card.phones.extend(new_phones[:2])
-    new_emails = [e for e in facts.emails if e not in card.emails]
-    card.emails.extend(new_emails[:2])
     if facts.description and not card.description:
         card.description = facts.description
     if facts.min_order and not card.min_order:
