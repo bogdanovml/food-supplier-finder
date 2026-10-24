@@ -415,7 +415,9 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             c_url = url.rstrip("/") + "/" + suffix
             contact_html = await fetch_html(c_url)
             cpage_text = _text_of(contact_html) if contact_html else ""
-            if len(cpage_text) < 200:  # и там SPA — рендерим
+            # рендер — только для первичной пробы /kontakty: у антиспам-сайтов
+            # каждая страница — 5-10с рендера, шесть проб = минута на сайт
+            if len(cpage_text) < 200 and suffix == "kontakty":
                 contact_html = await render_html(c_url) or contact_html
                 cpage_text = _text_of(contact_html)
             return regex_facts(c_url, cpage_text)

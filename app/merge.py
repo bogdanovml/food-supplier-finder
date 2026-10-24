@@ -419,7 +419,7 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
     _apply_contact_facts(card, facts)
     if facts.match == "adjacent":
         card.relevance = max(0, card.relevance - 10)
-        card.sources["тип"] = f"{(facts.sources.get('тип') or '')} смежная категория".strip()
+        card.sources["тип"] = ((facts.kind + " — ") if facts.kind else "") + "смежная категория"
     elif facts.match == "profile":
         card.relevance = min(100, card.relevance + 5)
 
