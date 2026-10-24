@@ -317,31 +317,52 @@ async def by_name(name: str, *, min_score: int = 75, trust_first: bool = False) 
 async def contacts_by_ogrn(ogrn: str) -> dict:
     """Контакты и сайт юрлица из карточки ЕГРЮЛ на checko.
 
-    Принимает ОГРН (13 цифр) или ИНН (10-12): поиск checko редиректит
-    на карточку по любому идентификатору. Закрывает кейс гос-поставщиков
-    из 44-ФЗ: в реестре у них только ИНН (ОГРН приходит позже из DaData),
-    а телефоны/email лежат в их карточке ЕГРЮЛ.
+    Принимает ОГРН (13 цифр) или ИНН (10-12): поиск редиректит на карточку
+    по любому идентификатору.
+
+    Анти-рейт-лимит (урок 429+SmartCaptcha): checko ограничивает частые
+    запросы, поэтому:
+      * результат кэшируется в БД навсегда (контакты юрлиц меняются редко) —
+        повторные поиски не ходят в checko за тем же юрлицом;
+      * троттлинг: не более одного запроса в ~1.2с (глобальный семафор);
+      * при 429/капче — ставим блок-флаг на 30 минут и честно возвращаем
+        пусто: обход капчи не вариант, остальные источники продолжают.
     """
-    if not ogrn or not re.match(r"^\d{10,15}$", ogrn):
+    if not ogrn or not re.match(r"^\d{10,15}$", ogrn or ""):
         return {}
+    from .. import db as _db
+
+    cached = _db.checko_cache_get(ogrn)
+    if cached is not None:
+        return cached
+
+    if _CheckoState.blocked_until > _now_ts():
+        return {}
+
     out: dict = {}
     card_url = f"{BASE}/search?query={ogrn}"
-    async with _sem:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
-                                      headers={"User-Agent": UA}) as client:
-            try:
+    async with _checko_sem:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
+                                          headers={"User-Agent": UA}) as client:
                 resp = await client.get(f"{BASE}/search?query={ogrn}", follow_redirects=True)
+                if resp.status_code == 429 or "подтвердите" in resp.text[:3000].lower():
+                    _CheckoState.blocked_until = _now_ts() + 30 * 60
+                    logger.warning("checko rate-limited (429/капча): блок на 30 минут")
+                    return {}
                 if resp.status_code == 200 and len(resp.text) > 2000:
                     html = resp.text
                     if "/company/" in str(resp.url):
-                        card_url = str(resp.url)   # карточка после редиректа
+                        card_url = str(resp.url)
                 else:
                     html = ""
-            except httpx.HTTPError as exc:
-                logger.debug("checko ogrn fetch failed: %s", exc)
-                html = ""
+                await asyncio.sleep(0.7)   # вежливый темп
+        except httpx.HTTPError as exc:
+            logger.debug("checko ogrn fetch failed: %s", exc)
+            return {}
     if not html:
         return {}
+
     import html as html_mod
     text = html_mod.unescape(re.sub(r"<[^>]+>", " ", html))
     text = re.sub(r"\s+", " ", text)
@@ -369,9 +390,29 @@ async def contacts_by_ogrn(ogrn: str) -> dict:
     if emails:
         out["emails"] = emails
 
-    m = re.search(r"Веб-сайт\s+([a-z0-9\-]+\.[a-z0-9\-.]{2,30})\s", text[:80000], re.I)
+    m = re.search(r"Веб-сайт[ы]*\s+([a-z0-9\-]+\.[a-z0-9\-.]{2,30})\s", text[:80000], re.I)
     if m:
         out["site"] = m.group(1).strip(".")
     if "/company/" in card_url:
         out["checko_url"] = card_url
+    if out:
+        _db.checko_cache_put(ogrn, out)
     return out
+
+
+# ------------------------------ состояние checko ------------------------------
+
+import time as _time_mod
+
+
+def _now_ts() -> float:
+    return _time_mod.time()
+
+
+class _CheckoState:
+    """Блок-флаг checko: после 429/капчи молчим 30 минут, не долбим."""
+    blocked_until: float = 0.0
+
+
+# троттлинг: один запрос за раз + пауза внутри (см. contacts_by_ogrn)
+_checko_sem = asyncio.Semaphore(1)

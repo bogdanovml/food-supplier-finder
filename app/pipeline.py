@@ -364,10 +364,17 @@ async def _checko_contacts_pass(cards: list, emit: Emit) -> None:
     deficient = [c for c in cards if (c.ogrn or c.inn) and not (c.emails or c.phones)]
     deficient.sort(key=lambda c: c.relevance, reverse=True)
     if deficient:
-        await emit({"type": "stage", "stage": "company", "status": "run",
-                    "message": f"карточки ЕГРЮЛ (checko): {len(deficient)} компаний без контактов"})
-        await asyncio.gather(*(_fill(c) for c in deficient[:100]))
-        for c in deficient[:100]:
+        from .sources.companyinfo import _CheckoState
+        import time as _time
+        blocked = _CheckoState.blocked_until > _time.time()
+        msg = (f"карточки ЕГРЮЛ (checko): {min(len(deficient), 40)} компаний"
+               if not blocked else
+               "checko временно ограничил запросы (лимит) — контакты из "
+               "карточек ЕГРЮЛ пропущены, работают сайт-обход и другие источники")
+        await emit({"type": "stage", "stage": "company", "status": "run", "message": msg})
+        # троттлинг 1.2с/запрос: 40 карточек ≈ 50с; результаты кэшируются в БД
+        await asyncio.gather(*(_fill(c) for c in deficient[:40]))
+        for c in deficient[:40]:
             if c.emails or c.phones:
                 await emit({"type": "supplier", "data": _row(c)})
     # ссылка на карточку ЕГРЮЛ — всем с идентификатором

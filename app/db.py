@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS notes (
     text TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS checko_cache (
+    ref TEXT PRIMARY KEY,
+    json TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS registry (
     key TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -369,3 +374,23 @@ def registry_stats() -> dict:
         n_prod = c.execute("SELECT COUNT(DISTINCT query) FROM registry_products").fetchone()[0]
         n_links = c.execute("SELECT COUNT(*) FROM registry_products").fetchone()[0]
         return {"suppliers": n_sup, "product_queries": n_prod, "links": n_links}
+
+
+# ------------------------------ кэш checko (анти-рейт-лимит) ------------------------------
+
+def checko_cache_get(ref: str) -> dict | None:
+    """Кэш карточек ЕГРЮЛ: контакты юрлица меняются редко —
+    повторные запросы к checko по тому же ИНН/ОГРН бессмысленны."""
+    with db() as c:
+        row = c.execute("SELECT json FROM checko_cache WHERE ref=?", (ref,)).fetchone()
+        if not row:
+            return None
+        import json as _json
+        return _json.loads(row[0])
+
+
+def checko_cache_put(ref: str, data: dict) -> None:
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO checko_cache (ref, json, fetched_at) VALUES (?,?,?)",
+                  (ref, _j(data), _now()))
+        c.commit()
