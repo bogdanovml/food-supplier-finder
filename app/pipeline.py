@@ -246,110 +246,35 @@ def _pessimize_all(cards) -> None:
     _pessimize_thin(cards)
 
 
-async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: int = 18) -> None:
-    """Юрлица: dadata/checko по ИНН/ОГРН/названию + полный опыт 44/223-ФЗ.
+async def _resolve_legal(cards: list, emit: Emit, limit: int = 30) -> None:
+    """Водопад, этап 1: идентификаторы и статус (DaData, ЕГРЮЛ).
 
-    Приоритет: (1) карточки с известным ИНН — быстрая валидация ЕГРЮЛ;
-    (2) домен-карточки (бренд-лукап через DaData, кейс auchan.ru);
-    (3) остальные по рейтингу."""
+    Обрабатываем ВСЕ карточки с дефицитом (нет ИНН/ОГРН/юрлица/статуса).
+    DaData — единственный платный (метрованный) источник, поэтому здесь
+    сохраняется потолок: приоритет — карточки с ИНН (дешёвая валидация),
+    затем домен-карточки (бренд-лукап), затем остальные по релевантности."""
     await emit({"type": "stage", "stage": "company", "status": "start",
-                "message": "Проверка юрлиц через ЕГРЮЛ (DaData) и опыт 44/223-ФЗ по ИНН"})
-    with_inn = [c for c in cards if c.inn]
-    rest = [c for c in cards if not c.inn]
-    # домен-карточки бустим: бренд-лукап дешёвый и даёт юрлицо даже пустышке
+                "message": "ЕГРЮЛ (DaData): идентификаторы и статус юрлиц"})
+    deficient = [c for c in cards
+                 if c.inn or not c.ogrn or not c.legal_name or not c.company_status]
+    with_inn = [c for c in deficient if c.inn]
+    rest = [c for c in deficient if not c.inn]
     rest.sort(key=lambda c: (c.relevance + (10 if c.domain else 0)), reverse=True)
     top = (with_inn + rest)[:limit]
-
-    def is_bl(d: str) -> bool:
-        from .merge import is_blacklisted
-        return is_blacklisted(d)
-
-    # --- параллельный проход: контакты/сайт из карточек ЕГРЮЛ (checko)
-    # для ВСЕХ юрлиц с ОГРН без контактов (кейс ООО «АВИСТРОН»: контакты
-    # есть в карточке компании, но карточка с низким рейтингом не попадала
-    # в top-N основной проверки) ---
-    from .merge import domain_key
-
-    async def _fill_contacts(c):
-        try:
-            cc = await companyinfo_src.contacts_by_ogrn(c.ogrn or c.inn)
-        except Exception as exc:
-            logger.debug("contacts_by_ogrn %s failed: %s", c.ogrn, exc)
-            return
-        if not cc:
-            return
-        for p in cc.get("phones", [])[:2]:
-            if p not in c.phones:
-                c.phones.append(p)
-        for e in cc.get("emails", [])[:2]:
-            if e not in c.emails:
-                c.emails.append(e)
-        if cc.get("site") and not c.site:
-            d = domain_key(cc["site"])
-            if d and not is_bl(d):
-                c.domain = d
-                c.site = "https://" + cc["site"]
-                c.sources["сайт"] = f"ЕГРЮЛ (checko.ru): {d}"
-        if cc.get("phones") or cc.get("emails"):
-            c.sources["контакты"] = "ЕГРЮЛ: карточка checko.ru"
-        if cc.get("checko_url"):
-            c.checko_url = cc["checko_url"]
-
-    # --- всё ещё без контактов и без сайта: ищем сайт по названию юрлица ---
-    siteless = [c for c in cards
-                if not (c.emails or c.phones) and not c.site
-                and (c.legal_name or c.name)]
-    if siteless:
-        siteless.sort(key=lambda c: c.relevance, reverse=True)
-        await emit({"type": "stage", "stage": "company", "status": "run",
-                    "message": f"поиск сайтов по названию: {min(len(siteless), 25)} компаний"})
-        await _find_sites_for(siteless[:25], emit, limit=25)
-
-    # --- Яндекс Карты: рейтинг и отзывы для топ-карточек в регионе ---
-    from .sources.maps import org_profile
-    from .merge import region_ok as _rok
-    maps_candidates = [c for c in cards
-                        if c.city and _rok(c.city, region_name)
-                        and not c.maps_url]
-    maps_candidates.sort(key=lambda c: c.relevance, reverse=True)
-    maps_candidates = maps_candidates[:10]
-    if maps_candidates:
-        await emit({"type": "stage", "stage": "company", "status": "run",
-                    "message": f"Яндекс Карты: рейтинг {len(maps_candidates)} компаний"})
-
-        async def _maps(c):
-            query_name = (c.legal_name or c.name).replace('"', "")
-            prof = await org_profile(query_name, c.city)
-            if prof:
-                c.maps_url = prof.get("url")
-                c.maps_rating = prof.get("rating")
-                c.maps_reviews = prof.get("reviews")
-                c.sources["рейтинг"] = (f"Яндекс Карты: {prof.get('rating')} "
-                                       f"({prof.get('reviews')} отзывов)")
-            else:
-                # профиля на Картах нет (типично для B2B) — глубокая ссылка
-                # на поисковую выдачу, юзер может открыть и посмотреть сам
-                from urllib.parse import quote
-                c.maps_url = ("https://yandex.ru/maps/?text="
-                              + quote(f"{query_name} {c.city}"))
-
-        await asyncio.gather(*(_maps(c) for c in maps_candidates))
-
     for c in top:
         try:
             info = None
             if c.inn:
-                # ЕГРЮЛ — единственный источник истины: сайт может называть
-                # себя брендом или устаревшим именем. DaData всегда перекрывает.
+                # ЕГРЮЛ — источник истины: сайт может называть себя брендом
+                # или устаревшим именем. DaData всегда перекрывает.
                 info = await companyinfo_src.by_inn(c.inn)
             elif c.ogrn:
-                info = await companyinfo_src.by_inn(c.ogrn)   # dadata находит и по ОГРН
+                info = await companyinfo_src.by_inn(c.ogrn)  # dadata ищет и по ОГРН
                 if info:
                     c.inn = info.inn
                     c.sources["ИНН"] = f"ЕГРЮЛ: найден по ОГРН {c.ogrn}"
-            elif not c.ogrn:
-                # у органики имя = домен: ищем юрлицо по бренду из домена
-                # (кейс auchan.ru -> 'auchan' -> ООО «АШАН») или по названию
+            else:
+                # органика: имя = домен -> бренд-лукап (auchan.ru -> ООО «АШАН»)
                 if c.domain:
                     brand = c.domain.split(".")[0]
                     info = await companyinfo_src.by_name(brand, trust_first=True)
@@ -357,15 +282,14 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
                     info = await companyinfo_src.by_name(c.name)
                 if info:
                     c.inn = info.inn
-                    c.sources["юрлицо"] = f"ЕГРЮЛ (dadata.ru): найдено по бренду сайта"
+                    c.sources["юрлицо"] = "ЕГРЮЛ (dadata.ru): найдено по бренду сайта"
             if info and info.inn:
                 if not c.inn:
                     c.inn = info.inn
                 if not c.legal_name and info.legal_name:
                     c.legal_name = info.legal_name
-                elif info.legal_name and c.legal_name and info.legal_name.upper() != c.legal_name.upper():
-                    # сайт назвался иначе, чем ЕГРЮЛ (бренд/переименование) —
-                    # показываем оба: ЕГРЮЛ как юрлицо, сайтовое как «бренд»
+                elif info.legal_name and c.legal_name \
+                        and info.legal_name.upper() != c.legal_name.upper():
                     c.sources["бренд/название сайта"] = f"сайт: {c.legal_name}"
                     c.legal_name = info.legal_name
                 if not c.ogrn and info.ogrn:
@@ -380,14 +304,10 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
                     c.company_status = info.status
                 if not c.staff and info.staff:
                     c.staff = info.staff
-                src = (info.source_url or "").split("/")[2] if info.source_url else "ЕГРЮЛ"
-                c.sources["юрлицо"] = f"ЕГРЮЛ ({src}): {info.legal_name or c.name}"
+                src_host = (info.source_url or "").split("/")[2] if info.source_url else "ЕГРЮЛ"
+                c.sources["юрлицо"] = f"ЕГРЮЛ ({src_host}): {info.legal_name or c.name}"
                 if info.status and info.status != "Действующая":
                     c.relevance = 0
-            # (контакты из карточек ЕГРЮЛ заполняются отдельным параллельным
-            #  проходом выше — _fill_contacts — для ВСЕХ карточек с ОГРН,
-            #  а не только попавших в top-N)
-
             # узнав ИНН — проверяем полный опыт 44/223-ФЗ
             if c.inn and c.gov_contracts_count == 0:
                 stat = await gosplan_src.contracts_by_inn(c.inn, limit=5)
@@ -403,33 +323,86 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
                     c.relevance = min(100, c.relevance + 10)
             await emit({"type": "supplier", "data": _row(c)})
         except Exception as exc:
-            logger.debug("company stage card %s failed: %s", c.name, exc)
+            logger.debug("resolve legal %s failed: %s", c.name, exc)
+    await emit({"type": "stage", "stage": "company", "status": "run",
+                "message": f"ЕГРЮЛ проверен: {sum(1 for c in cards if c.company_status)} юрлиц"})
 
-    # --- контакты из карточек ЕГРЮЛ: ПОСЛЕ DaData-прохода — гос-поставщики
-    # получают ОГРН только из DaData (в реестре 44-ФЗ у них лишь ИНН),
-    # а их телефоны/email лежат в checko-карточке. Ищем по ОГРН или ИНН. ---
-    ogr_cards = [c for c in cards
-                 if (c.ogrn or c.inn) and not (c.emails or c.phones)]
-    ogr_cards.sort(key=lambda c: c.relevance, reverse=True)
-    ogr_cards = ogr_cards[:60]
-    if ogr_cards:
+
+async def _checko_contacts_pass(cards: list, emit: Emit) -> None:
+    """Водопад, этап 2 (самый дешёвый и урожайный): checko-карточки.
+
+    ВСЕ карточки с ИНН/ОГРН без контактов: один визит в карточку ЕГРЮЛ
+    даёт телефоны, email, сайт и прямую ссылку на карточку — 70-80% всех
+    контактов берётся именно здесь (~0.5с на карточку)."""
+    from .merge import domain_key, is_blacklisted
+
+    async def _fill(c):
+        try:
+            cc = await companyinfo_src.contacts_by_ogrn(c.ogrn or c.inn)
+        except Exception as exc:
+            logger.debug("contacts_by_ogrn %s failed: %s", c.ogrn or c.inn, exc)
+            return
+        if not cc:
+            return
+        for ph in cc.get("phones", [])[:2]:
+            if ph not in c.phones:
+                c.phones.append(ph)
+        for e in cc.get("emails", [])[:2]:
+            if e not in c.emails:
+                c.emails.append(e)
+        if cc.get("site") and not c.site:
+            d = domain_key(cc["site"])
+            if d and not is_blacklisted(d):
+                c.domain = d
+                c.site = "https://" + cc["site"]
+                c.sources["сайт"] = f"ЕГРЮЛ (checko.ru): {d}"
+        if cc.get("phones") or cc.get("emails"):
+            c.sources["контакты"] = "ЕГРЮЛ: карточка checko.ru"
+        if cc.get("checko_url"):
+            c.checko_url = cc["checko_url"]
+
+    deficient = [c for c in cards if (c.ogrn or c.inn) and not (c.emails or c.phones)]
+    deficient.sort(key=lambda c: c.relevance, reverse=True)
+    if deficient:
         await emit({"type": "stage", "stage": "company", "status": "run",
-                    "message": f"контакты из карточек ЕГРЮЛ: {len(ogr_cards)} юрлиц"})
-        await asyncio.gather(*(_fill_contacts(c) for c in ogr_cards))
-        for c in ogr_cards:
+                    "message": f"карточки ЕГРЮЛ (checko): {len(deficient)} компаний без контактов"})
+        await asyncio.gather(*(_fill(c) for c in deficient[:100]))
+        for c in deficient[:100]:
             if c.emails or c.phones:
                 await emit({"type": "supplier", "data": _row(c)})
-
-    # у всех карточек с идентификатором — прямая ссылка на карточку ЕГРЮЛ
+    # ссылка на карточку ЕГРЮЛ — всем с идентификатором
     for c in cards:
         ident = c.ogrn or c.inn
         if ident and not c.checko_url:
             c.checko_url = f"https://checko.ru/search?query={ident}"
 
-    # финальный проход: чеко-ссылка по любому идентификатору (ИНН или ОГРН —
-    # поиск редиректит на карточку); DaData мог дать ОГРН только что
-    await emit({"type": "stage", "stage": "company", "status": "done",
-                "found": sum(1 for c in cards if c.inn)})
+
+async def _maps_pass(cards: list, emit: Emit, region_name: str, limit: int = 10) -> None:
+    """Водопад, финальный (самый тяжёлый и низкоурожайный): Яндекс Карты."""
+    from .sources.maps import org_profile
+    from .merge import region_ok as _rok
+    candidates = [c for c in cards if c.city and _rok(c.city, region_name) and not c.maps_url]
+    candidates.sort(key=lambda c: c.relevance, reverse=True)
+    candidates = candidates[:limit]
+    if candidates:
+        await emit({"type": "stage", "stage": "company", "status": "run",
+                    "message": f"Яндекс Карты: рейтинг {len(candidates)} компаний"})
+
+    async def _maps(c):
+        query_name = (c.legal_name or c.name).replace('"', "")
+        prof = await org_profile(query_name, c.city)
+        if prof:
+            c.maps_url = prof.get("url")
+            c.maps_rating = prof.get("rating")
+            c.maps_reviews = prof.get("reviews")
+            c.sources["рейтинг"] = (f"Яндекс Карты: {prof.get('rating')} "
+                                   f"({prof.get('reviews')} отзывов)")
+        else:
+            # профиля нет (типично для B2B) — глубокая ссылка на поиск
+            from urllib.parse import quote
+            c.maps_url = "https://yandex.ru/maps/?text=" + quote(f"{query_name} {c.city}")
+
+    await asyncio.gather(*(_maps(c) for c in candidates))
 
 
 async def _find_sites_for(cards: list, emit: Emit, limit: int = 8) -> None:
@@ -501,19 +474,53 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         for c in sorted(cards, key=lambda x: x.relevance, reverse=True):
             await emit({"type": "supplier", "data": _row(c)})
 
-        # --- юрлица и контакты ПЕРВЫМИ: DaData (ОГРН/юрлицо) -> checko-карточки
-        # (контакты+сайт одним визитом) -> сайт-поиск по названию. Все карточки
-        # получают максимум идентификаторов и сайтов ДО обхода.
-        await emit({"type": "stage", "stage": "enrich", "status": "pending"})
-        await _run_company(cards, emit, region_name)
+        # =================================================================
+        # ВОДОПАД ДОСБОРА: все карточки с дефицитом, источники от дешёвых
+        # урожайных к тяжёлым; каждый этап снижает работу следующего.
+        # =================================================================
 
-        # --- ОДИН обход сайтов: теперь покрывает и сайты, найденные в checko/
-        # поиске по названию (раньше они отыскивались после обхода — зря) ---
+        # --- 1. Идентификаторы и статус: ЕГРЮЛ через DaData (метрованный
+        #     API — единственный осознанный потолок), гособход 44/223-ФЗ ---
+        await _resolve_legal(cards, emit, limit=30)
+
+        # --- 2. Неактивные юрлица — сразу вон: нет смысла тратить обходы ---
+        before = len(cards)
+        cards = [c for c in cards
+                 if not (c.company_status and c.company_status != "Действующая")]
+        excluded = before - len(cards)
+        if excluded:
+            stats["excluded_inactive"] = excluded
+            await emit({"type": "stage", "stage": "company", "status": "run",
+                        "message": f"скрыто неактивных юрлиц: {excluded}"})
+
+        # --- 3. Checko-карточки: телефоны/email/сайт одним визитом —
+        #     самый дешёвый источник (0.5с/шт), 70-80% контактов здесь ---
+        await _checko_contacts_pass(cards, emit)
+
+        # --- 4. Сайт-поиск по названию юрлица: для тех, кто ещё без
+        #     контактов и без сайта (Яндекс XML ~1.5с/шт) ---
+        siteless = [c for c in cards
+                    if not (c.emails or c.phones) and not c.site
+                    and (c.legal_name or c.name)]
+        if siteless:
+            siteless.sort(key=lambda c: c.relevance, reverse=True)
+            await emit({"type": "stage", "stage": "company", "status": "run",
+                        "message": f"поиск сайтов по названию: {min(len(siteless), 40)} компаний"})
+            await _find_sites_for(siteless[:40], emit, limit=40)
+
+        # --- 5. Обход сайтов: ВСЕ дефицитные с сайтом (самый тяжёлый
+        #     источник ~10-20с/шт, поэтому последним). Дефицит-приоритет:
+        #     бесконтактные — первыми, потом недообогащённые (нет цен/МОК) ---
         await emit({"type": "stage", "stage": "enrich", "status": "start"})
         by_domain = {c.domain: c for c in cards if c.domain}
-        to_enrich = [c for c in cards
-                     if c.site and not (c.emails and c.phones)]
-        to_enrich = sorted(to_enrich, key=lambda x: x.relevance, reverse=True)[:s.enrich_max_sites]
+        contactless = [c for c in cards
+                       if c.site and not (c.emails or c.phones)]
+        partial = [c for c in cards
+                   if c.site and (c.emails or c.phones)
+                   and not (c.price_min or c.min_order)]
+        contactless.sort(key=lambda x: x.relevance, reverse=True)
+        partial.sort(key=lambda x: x.relevance, reverse=True)
+        to_enrich = (contactless + partial)[:s.enrich_max_sites]
 
         async def prog(url: str, facts) -> None:
             card = by_domain.get(_domain_of(url))
@@ -533,8 +540,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         await emit({"type": "stage", "stage": "enrich", "status": "done",
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
 
-        # --- гео-несовпадение: поставщик из другого города при поиске
-        #     по городу федерального значения — минус к рейтингу + заметка ---
+        # --- 6. Гео-несовпадение: пессимизация + заметка ---
         from .merge import region_ok as _region_ok
         geo_mismatches = 0
         for c in cards:
@@ -546,16 +552,10 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             await emit({"type": "stage", "stage": "company", "status": "run",
                         "message": f"гео-несовпадений: {geo_mismatches} (пессимизированы)"})
 
-        # --- неактивные юрлица (ликвидированы/в процессе) — НЕ показываем:
-        # поставки от мёртвой компании невозможны, нет смысла в выборке ---
-        before = len(cards)
-        cards = [c for c in cards if not (c.company_status and c.company_status != "Действующая")]
-        excluded = before - len(cards)
-        if excluded:
-            stats["excluded_inactive"] = excluded
-            await emit({"type": "stage", "stage": "company", "status": "done",
-                        "found": sum(1 for c in cards if c.inn),
-                        "message": f"скрыто неактивных юрлиц: {excluded}"})
+        # --- 7. Яндекс Карты (самый тяжёлый и низкоурожайный): рейтинг ---
+        await _maps_pass(cards, emit, region_name)
+        await emit({"type": "stage", "stage": "company", "status": "done",
+                    "found": sum(1 for c in cards if c.inn)})
 
         _pessimize_all(cards)
 
