@@ -337,13 +337,16 @@ function refreshKpis(forcedSeconds = null) {
   document.getElementById("count-region").textContent = list.filter(cardInRegion).length;
   document.getElementById("count-gov").textContent = govCount;
   document.getElementById("count-optlist").textContent = optlistCount;
-  document.getElementById("count-contacts").textContent = list.filter(s => s.emails && s.emails.length).length;
+  document.getElementById("count-contacts").textContent = list.filter(s => (s.emails && s.emails.length) || (s.phones && s.phones.length)).length;
 }
 
 /* --------------------------------------------------------------------------
    Tabulator Table Configuration
    -------------------------------------------------------------------------- */
 function buildTable() {
+  /* Таблица спроектирована под скан закупщика: за 3 секунды на строку видно
+     контакты, цену, МОК и надёжность. Источник/ИНН/обоснование/статус —
+     в досье, чтобы не глушить сравнение. */
   table = new Tabulator("#suppliers-table", {
     layout: "fitColumns",
     responsiveLayout: false,
@@ -367,128 +370,102 @@ function buildTable() {
       {
         title: "Поставщик",
         field: "name",
-        widthGrow: 2.2,
-        minWidth: 180,
+        widthGrow: 2,
+        minWidth: 160,
         headerSort: true,
         formatter: (cell) => {
           const d = cell.getData();
-          const srcValues = Object.values(d.sources || {}).join(" ");
-          let sourceBadge = "";
-          if (d.gov_contracts_count > 0) {
-            sourceBadge = '<span class="badge badge-source badge-source-gov" title="Найден через реестр исполненных контрактов 44-ФЗ: подтверждённые поставки госзаказчикам">Госзакупки 44-ФЗ</span>';
-          } else if (d.site && d.site.includes("optlist.ru")) {
-            sourceBadge = '<span class="badge badge-source badge-source-catalog" title="Поставщик из B2B-каталога оптовиков optlist.ru">Каталог optlist</span>';
-          } else if (srcValues.includes("ЕГРЮЛ")) {
-            sourceBadge = '<span class="badge badge-source badge-source-okved" title="Действующее юрлицо отрасли из реестра ЕГРЮЛ по ОКВЭД: адрес, директор, выручка">Реестр ОКВЭД</span>';
-          } else {
-            sourceBadge = '<span class="badge badge-source badge-source-serp" title="Сайт компании найден через региональный поиск (Яндекс/Google); данные обогащены обходом сайта">Поиск (сайт)</span>';
-          }
-          const innSub = d.inn ? `<span class="text-muted small ms-1">(ИНН ${escapeHtml(d.inn)})</span>` : "";
-          return `<div><div class="fw-semibold text-dark">${sourceBadge} ${escapeHtml(d.name)}</div>${innSub ? '<div style="font-size:11px">' + innSub + '</div>' : ''}</div>`;
+          const kind = (d.sources && d.sources["тип"]) || "";
+          const kindTag = kind.includes("производитель")
+            ? '<span class="text-muted small ms-1">производитель</span>'
+            : kind.includes("дистрибьютер") || kind.includes("дистрибьютор")
+              ? '<span class="text-muted small ms-1">дистрибьютер</span>'
+              : "";
+          return `<div class="fw-semibold text-dark">${escapeHtml(d.name)}${kindTag}</div>`;
         }
       },
       {
         title: "Город",
         field: "city",
-        width: 110,
+        width: 100,
         headerSort: true,
         sorter: "string",
         formatter: (cell) => {
           const d = cell.getData();
           const val = d.city || d.region || "";
           if (!val) return '<span class="text-muted">—</span>';
-          // мусорные города (индексы/мусор) показываем приглушённо как регион
           return /^[А-ЯЁA-Z]/.test(val) ? escapeHtml(val) : escapeHtml(d.region || "—");
         }
       },
       {
-        title: "Контакты",
-        field: "emails",
-        widthGrow: 1.5,
-        minWidth: 130,
+        title: "Телефон",
+        field: "phones",
+        width: 130,
         headerSort: false,
         formatter: (cell) => {
-          const d = cell.getData();
-          const items = [];
-          if (d.emails && d.emails.length) items.push(`<span>Email: ${escapeHtml(d.emails[0])}</span>`);
-          if (d.phones && d.phones.length) items.push(`<span class="text-muted">Тел: ${escapeHtml(d.phones[0])}</span>`);
-          return items.length ? `<div style="font-size:12px;line-height:1.3">${items.join("<br>")}</div>` : '<span class="text-muted">—</span>';
+          const arr = cell.getValue() || [];
+          if (!arr.length) return '<span class="text-muted small">—</span>';
+          return `<span class="text-nowrap" style="font-size:12px">${escapeHtml(arr[0])}</span>`;
         }
       },
       {
-        title: "Мин. заказ",
-        field: "min_order",
-        width: 95,
+        title: "Email",
+        field: "emails",
+        width: 150,
         headerSort: false,
-        formatter: (c) => c.getValue() ? `<span class="badge bg-light text-dark border">${escapeHtml(c.getValue())}</span>` : '<span class="text-muted">—</span>'
+        formatter: (cell) => {
+          const arr = cell.getValue() || [];
+          if (!arr.length) return '<span class="text-muted small">—</span>';
+          return `<a href="mailto:${escapeHtml(arr[0])}" class="text-decoration-none" style="font-size:12px">${escapeHtml(arr[0])}</a>`;
+        }
       },
       {
         title: "Цена по запросу",
         field: "price_note",
         widthGrow: 1.6,
-        minWidth: 150,
+        minWidth: 140,
         headerSort: false,
         formatter: (cell) => {
           const d = cell.getData();
           const note = d.price_note || (d.price_min ? `от ${d.price_min} ₽` : "");
-          if (!note) return '<span class="text-muted small">По запросу КП</span>';
+          if (!note) return '<span class="text-muted small">По запросу</span>';
           const isGov = (d.price_note || "").startsWith("контракты:");
           const title = isGov ? "Фактические цены исполненных госконтрактов (44-ФЗ)" : "Цены с сайта поставщика по предмету запроса";
-          return `<div class="text-truncate" style="font-size:12px" title="${escapeHtml(title)}: ${escapeHtml(note)}">${isGov ? '<span class="text-success">' : ''}${escapeHtml(note.slice(0, 90))}${isGov ? '</span>' : ''}</div>`;
+          return `<div class="text-truncate" style="font-size:12px" title="${escapeHtml(title)}: ${escapeHtml(note)}">${isGov ? '<span class="text-success">' : ''}${escapeHtml(note.slice(0, 70))}${isGov ? '</span>' : ''}</div>`;
         }
       },
       {
-        title: "Опыт 44-ФЗ",
-        field: "gov_contracts_count",
-        width: 100,
-        hozAlign: "center",
-        headerSort: true,
-        sorter: "number",
-        formatter: (cell) => {
-          const d = cell.getData();
-          if (!d.gov_contracts_count) return '<span class="text-muted">—</span>';
-          const valMln = d.gov_contracts_value ? (d.gov_contracts_value / 1_000_000).toFixed(1) : "0";
-          return `<div style="line-height:1.2"><span class="fw-bold text-success">${d.gov_contracts_count} контр.</span><div style="font-size:10px" class="text-muted">${valMln} млн ₽</div></div>`;
-        }
-      },
-      {
-        title: "Обоснование ИИ",
-        field: "reasons",
-        widthGrow: 2.2,
-        minWidth: 160,
+        title: "Мин. заказ",
+        field: "min_order",
+        width: 90,
         headerSort: false,
-        formatter: (cell) => {
-          const d = cell.getData();
-          const reason = (d.reasons && d.reasons.length) ? d.reasons[0] : (d.description ? d.description.slice(0, 100) : "—");
-          return `<div class="text-truncate text-secondary" style="font-size:12px" title="${escapeHtml(reason)}">${escapeHtml(reason)}</div>`;
-        }
+        formatter: (c) => c.getValue() ? `<span class="badge bg-light text-dark border" style="font-size:11px">${escapeHtml(c.getValue())}</span>` : '<span class="text-muted small">—</span>'
       },
       {
-        title: "Статус",
-        field: "status",
-        width: 110,
-        hozAlign: "center",
-        headerSort: true,
-        formatter: (cell) => {
-          const val = cell.getValue() || "new";
-          const st = WORKFLOW_STATUSES[val] || WORKFLOW_STATUSES.new;
-          return `<span class="badge badge-wf ${st.class}">${st.label}</span>`;
-        },
-        cellClick: (e, cell) => {
-          e.stopPropagation();
-          cycleSupplierStatus(cell.getData());
-        }
-      },
-      {
-        title: "Баллы",
-        field: "relevance",
-        width: 75,
-        hozAlign: "center",
+        title: "Надёжность",
+        field: "gov_contracts_count",
+        widthGrow: 1.2,
+        minWidth: 120,
+        hozAlign: "left",
         headerSort: true,
         sorter: "number",
         formatter: (cell) => {
-          const val = Number(cell.getValue()) || 0;
-          return `<span class="fw-bold">${val}</span><span class="text-muted small">/100</span>`;
+          const d = cell.getData();
+          const bits = [];
+          if (d.gov_contracts_count) {
+            bits.push(`<span class="trust-chip trust-gov" title="Исполненные контракты 44-ФЗ: ${d.gov_contracts_count} шт на ${(d.gov_contracts_value || 0).toLocaleString('ru')} ₽">44-ФЗ: ${d.gov_contracts_count}</span>`);
+          }
+          if (d.revenue_note) {
+            bits.push(`<span class="trust-chip trust-rev" title="Выручка по ЕГРЮЛ">Оборот: ${escapeHtml(d.revenue_note)}</span>`);
+          }
+          if (d.maps_rating) {
+            bits.push(`<span class="trust-chip trust-map" title="Рейтинг на Яндекс Картах, ${d.maps_reviews || 0} отзывов">Карта: ${d.maps_rating.toFixed(1)}</span>`);
+          }
+          if (d.docs_verified) {
+            bits.push(`<span class="trust-chip trust-doc" title="Документы проверены каталогом optlist">Документы: ок</span>`);
+          }
+          if (!bits.length) return '<span class="text-muted small">—</span>';
+          return `<div class="d-flex flex-wrap gap-1">${bits.join("")}</div>`;
         }
       },
       {
@@ -504,10 +481,6 @@ function buildTable() {
       }
     ],
     initialSort: [{ column: "relevance", dir: "desc" }]
-  });
-
-  table.on("rowSelectionChanged", (data, rows) => {
-    updateSelectionState();
   });
 
   table.on("rowClick", (e, row) => {
@@ -541,7 +514,7 @@ function applyTableFilter(filterKey) {
   } else if (filterKey === "optlist") {
     table.setFilter((data) => data.site && data.site.includes("optlist.ru"));
   } else if (filterKey === "contacts") {
-    table.setFilter((data) => data.emails && data.emails.length > 0);
+    table.setFilter((data) => (data.emails && data.emails.length > 0) || (data.phones && data.phones.length > 0));
   }
 }
 
