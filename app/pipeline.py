@@ -402,8 +402,18 @@ async def _maps_pass(cards: list, emit: Emit, region_name: str, limit: int = 10)
             c.maps_url = prof.get("url")
             c.maps_rating = prof.get("rating")
             c.maps_reviews = prof.get("reviews")
-            c.sources["рейтинг"] = (f"Яндекс Карты: {prof.get('rating')} "
-                                   f"({prof.get('reviews')} отзывов)")
+            if c.maps_rating:
+                c.sources["рейтинг"] = (f"Яндекс Карты: {c.maps_rating} "
+                                       f"({c.maps_reviews or 0} отзывов)")
+            # контакты из профиля организации — страховка от лимита checko
+            for ph in prof.get("phones", [])[:2]:
+                if ph not in c.phones:
+                    c.phones.append(ph)
+            if prof.get("email") and prof["email"] not in c.emails:
+                c.emails.append(prof["email"])
+            if (prof.get("phones") or prof.get("email")) \
+                    and "контакты" not in c.sources:
+                c.sources["контакты"] = "Яндекс Карты (профиль организации)"
         else:
             # профиля нет (типично для B2B) — глубокая ссылка на поиск
             from urllib.parse import quote
