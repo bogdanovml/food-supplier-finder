@@ -264,6 +264,41 @@ async def _run_company(cards: list, emit: Emit, limit: int = 18) -> None:
         from .merge import is_blacklisted
         return is_blacklisted(d)
 
+    # --- параллельный проход: контакты/сайт из карточек ЕГРЮЛ (checko)
+    # для ВСЕХ юрлиц с ОГРН без контактов (кейс ООО «АВИСТРОН»: контакты
+    # есть в карточке компании, но карточка с низким рейтингом не попадала
+    # в top-N основной проверки) ---
+    from .merge import domain_key
+
+    async def _fill_contacts(c):
+        try:
+            cc = await companyinfo_src.contacts_by_ogrn(c.ogrn)
+        except Exception as exc:
+            logger.debug("contacts_by_ogrn %s failed: %s", c.ogrn, exc)
+            return
+        if not cc:
+            return
+        for p in cc.get("phones", [])[:2]:
+            if p not in c.phones:
+                c.phones.append(p)
+        for e in cc.get("emails", [])[:2]:
+            if e not in c.emails:
+                c.emails.append(e)
+        if cc.get("site") and not c.site:
+            d = domain_key(cc["site"])
+            if d and not is_bl(d):
+                c.domain = d
+                c.site = "https://" + cc["site"]
+                c.sources["сайт"] = f"ЕГРЮЛ (checko.ru): {d}"
+        if cc.get("phones") or cc.get("emails"):
+            c.sources["контакты"] = "ЕГРЮЛ: карточка checko.ru"
+
+    ogr_cards = [c for c in cards if c.ogrn and not (c.emails or c.phones)][:25]
+    if ogr_cards:
+        await emit({"type": "stage", "stage": "company", "status": "run",
+                    "message": f"контакты из карточек ЕГРЮЛ: {len(ogr_cards)} юрлиц"})
+        await asyncio.gather(*(_fill_contacts(c) for c in ogr_cards))
+
     for c in top:
         try:
             info = None
@@ -313,28 +348,9 @@ async def _run_company(cards: list, emit: Emit, limit: int = 18) -> None:
                 c.sources["юрлицо"] = f"ЕГРЮЛ ({src}): {info.legal_name or c.name}"
                 if info.status and info.status != "Действующая":
                     c.relevance = 0
-            # --- контакты из карточки ЕГРЮЛ (checko) для юрлиц без них ---
-            if c.ogrn and not (c.emails or c.phones):
-                try:
-                    cc = await companyinfo_src.contacts_by_ogrn(c.ogrn)
-                    if cc:
-                        for p in cc.get("phones", [])[:2]:
-                            if p not in c.phones:
-                                c.phones.append(p)
-                        for e in cc.get("emails", [])[:2]:
-                            if e not in c.emails:
-                                c.emails.append(e)
-                        if cc.get("site") and not c.site:
-                            from .merge import domain_key
-                            d = domain_key(cc["site"])
-                            if d and not is_bl(d):
-                                c.domain = d
-                                c.site = ("https://" + cc["site"])
-                                c.sources["сайт"] = f"ЕГРЮЛ (checko.ru): {d}"
-                        if cc.get("phones") or cc.get("emails"):
-                            c.sources["контакты"] = "ЕГРЮЛ: карточка checko.ru"
-                except Exception as exc:
-                    logger.debug("contacts_by_ogrn for %s failed: %s", c.ogrn, exc)
+            # (контакты из карточек ЕГРЮЛ заполняются отдельным параллельным
+            #  проходом выше — _fill_contacts — для ВСЕХ карточек с ОГРН,
+            #  а не только попавших в top-N)
 
             # узнав ИНН — проверяем полный опыт 44/223-ФЗ
             if c.inn and c.gov_contracts_count == 0:
