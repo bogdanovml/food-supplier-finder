@@ -330,8 +330,8 @@ async def contacts_by_ogrn(ogrn: str) -> dict:
         async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
                                       headers={"User-Agent": UA}) as client:
             try:
-                resp = await client.get(f"{BASE}/search?query={ogrn}")
-                if resp.status_code == 200:
+                resp = await client.get(f"{BASE}/search?query={ogrn}", follow_redirects=True)
+                if resp.status_code == 200 and len(resp.text) > 2000:
                     html = resp.text
                     if "/company/" in str(resp.url):
                         card_url = str(resp.url)   # карточка после редиректа
