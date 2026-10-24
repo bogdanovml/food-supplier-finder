@@ -427,11 +427,12 @@ function buildTable() {
         headerSort: false,
         formatter: (cell) => {
           const d = cell.getData();
-          const note = d.price_note || (d.price_min ? `от ${d.price_min} ₽` : "");
-          if (!note) return '<span class="text-muted small">По запросу</span>';
-          const isGov = (d.price_note || "").startsWith("контракты:");
-          const title = isGov ? "Фактические цены исполненных госконтрактов (44-ФЗ)" : "Цены с сайта поставщика по предмету запроса";
-          return `<div class="text-truncate" style="font-size:12px" title="${escapeHtml(title)}: ${escapeHtml(note)}">${isGov ? '<span class="text-success">' : ''}${escapeHtml(note.slice(0, 70))}${isGov ? '</span>' : ''}</div>`;
+          // цена ПО ПРОДУКТУ: суммы контрактов — не цена за товар, они в чипе «44-ФЗ»
+          let note = d.price_note || "";
+          if (note.startsWith("контракты:")) note = "";
+          if (!note && d.price_min) note = `от ${d.price_min} ₽${d.price_max ? ` до ${d.price_max} ₽` : ""}`;
+          if (!note) return '<span class="text-muted small">По запросу КП</span>';
+          return `<div class="text-truncate" style="font-size:12px" title="Цены с сайта поставщика по предмету запроса: ${escapeHtml(note)}">${escapeHtml(note.slice(0, 80))}</div>`;
         }
       },
       {
