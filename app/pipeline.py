@@ -101,7 +101,7 @@ async def _run_optlist(query: str, emit: Emit) -> list:
     await emit({"type": "stage", "stage": "optlist", "status": "start",
                 "message": "optlist.ru: поиск + карточки компаний (Playwright, ~1-2 мин)"})
     try:
-        hits = await optlist_src.search_suppliers(query, with_details=4)
+        hits = await optlist_src.search_suppliers(query, with_details=6)
         status = "done" if hits else "skipped"
         await emit({"type": "stage", "stage": "optlist", "status": status, "found": len(hits),
                     "message": "" if hits else "optlist: ничего не найдено/недоступен"})
@@ -272,7 +272,7 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
 
     async def _fill_contacts(c):
         try:
-            cc = await companyinfo_src.contacts_by_ogrn(c.ogrn)
+            cc = await companyinfo_src.contacts_by_ogrn(c.ogrn or c.inn)
         except Exception as exc:
             logger.debug("contacts_by_ogrn %s failed: %s", c.ogrn, exc)
             return
@@ -294,17 +294,6 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
             c.sources["контакты"] = "ЕГРЮЛ: карточка checko.ru"
         if cc.get("checko_url"):
             c.checko_url = cc["checko_url"]
-
-    ogr_cards = [c for c in cards if c.ogrn and not (c.emails or c.phones)][:25]
-    if ogr_cards:
-        await emit({"type": "stage", "stage": "company", "status": "run",
-                    "message": f"контакты из карточек ЕГРЮЛ: {len(ogr_cards)} юрлиц"})
-        await asyncio.gather(*(_fill_contacts(c) for c in ogr_cards))
-
-    # у всех карточек с ОГРН — прямая ссылка на карточку ЕГРЮЛ (через редирект)
-    for c in cards:
-        if c.ogrn and not c.checko_url:
-            c.checko_url = f"https://checko.ru/search?query={c.ogrn}"
 
     # --- Яндекс Карты: рейтинг и отзывы для топ-карточек в регионе ---
     from .sources.maps import org_profile
@@ -406,12 +395,29 @@ async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: in
         except Exception as exc:
             logger.debug("company stage card %s failed: %s", c.name, exc)
 
-    # финальный проход: чеко-ссылка по любому идентификатору (ИНН или ОГРН —
-    # поиск редиректит на карточку); DaData мог дать ОГРН только что
+    # --- контакты из карточек ЕГРЮЛ: ПОСЛЕ DaData-прохода — гос-поставщики
+    # получают ОГРН только из DaData (в реестре 44-ФЗ у них лишь ИНН),
+    # а их телефоны/email лежат в checko-карточке. Ищем по ОГРН или ИНН. ---
+    ogr_cards = [c for c in cards
+                 if (c.ogrn or c.inn) and not (c.emails or c.phones)]
+    ogr_cards.sort(key=lambda c: c.relevance, reverse=True)
+    ogr_cards = ogr_cards[:30]
+    if ogr_cards:
+        await emit({"type": "stage", "stage": "company", "status": "run",
+                    "message": f"контакты из карточек ЕГРЮЛ: {len(ogr_cards)} юрлиц"})
+        await asyncio.gather(*(_fill_contacts(c) for c in ogr_cards))
+        for c in ogr_cards:
+            if c.emails or c.phones:
+                await emit({"type": "supplier", "data": _row(c)})
+
+    # у всех карточек с идентификатором — прямая ссылка на карточку ЕГРЮЛ
     for c in cards:
         ident = c.ogrn or c.inn
         if ident and not c.checko_url:
             c.checko_url = f"https://checko.ru/search?query={ident}"
+
+    # финальный проход: чеко-ссылка по любому идентификатору (ИНН или ОГРН —
+    # поиск редиректит на карточку); DaData мог дать ОГРН только что
     await emit({"type": "stage", "stage": "company", "status": "done",
                 "found": sum(1 for c in cards if c.inn)})
 
