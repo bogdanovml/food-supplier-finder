@@ -127,7 +127,8 @@ def _conn() -> sqlite3.Connection:
             pass
         for col in ("legal_name TEXT", "ogrn TEXT", "director TEXT", "okved TEXT",
                     "reg_date TEXT", "company_status TEXT", "staff TEXT", "revenue_note TEXT",
-                    "checko_url TEXT", "maps_url TEXT", "maps_rating REAL", "maps_reviews INTEGER"):
+                    "checko_url TEXT", "maps_url TEXT", "maps_rating REAL", "maps_reviews INTEGER",
+                    "product_links TEXT", "order_terms TEXT"):
             try:
                 conn.execute(f"ALTER TABLE suppliers ADD COLUMN {col}")
                 conn.commit()
@@ -201,6 +202,7 @@ SUPPLIER_COLS = [
     "search_id", "name", "domain", "inn", "legal_name", "ogrn", "director",
     "okved", "reg_date", "company_status", "staff", "revenue_note",
     "checko_url", "maps_url", "maps_rating", "maps_reviews",
+    "product_links", "order_terms",
     "city", "region", "phones", "emails",
     "site", "description", "categories", "price_min", "price_max", "price_note",
     "min_order", "delivery", "certificates", "gov_contracts_count",
@@ -213,7 +215,7 @@ def insert_supplier(data: dict) -> int:
     payload = {k: data.get(k) for k in SUPPLIER_COLS}
     if not payload.get("status"):
         payload["status"] = "new"
-    for k in ("phones", "emails", "categories", "certificates", "reasons", "sources", "gov_contract_examples"):
+    for k in ("phones", "emails", "categories", "certificates", "reasons", "sources", "gov_contract_examples", "product_links"):
         payload[k] = _j(payload[k]) if payload[k] is not None else None
     cols = ", ".join(SUPPLIER_COLS)
     ph = ", ".join("?" * len(SUPPLIER_COLS))
@@ -234,7 +236,7 @@ def get_suppliers(search_id: int) -> list[dict]:
         out = []
         for r in rows:
             d = dict(r)
-            for k in ("phones", "emails", "categories", "certificates", "reasons", "sources"):
+            for k in ("phones", "emails", "categories", "certificates", "reasons", "sources", "product_links"):
                 d[k] = _uj(d.get(k), [] if k in ("phones", "emails", "categories", "certificates") else {})
             out.append(d)
         return out
@@ -246,7 +248,7 @@ def get_supplier(supplier_id: int) -> dict | None:
         if not r:
             return None
         d = dict(r)
-        for k in ("phones", "emails", "categories", "certificates", "reasons", "sources"):
+        for k in ("phones", "emails", "categories", "certificates", "reasons", "sources", "product_links"):
             d[k] = _uj(d.get(k), [] if k in ("phones", "emails", "categories", "certificates") else {})
         return d
 

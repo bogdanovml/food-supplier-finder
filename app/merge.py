@@ -145,6 +145,8 @@ class SupplierCard:
     maps_url: str | None = None
     maps_rating: float | None = None
     maps_reviews: int | None = None
+    product_links: list[str] = field(default_factory=list)
+    order_terms: str | None = None
     city: str = ""
     region: str = ""
     phones: list[str] = field(default_factory=list)
@@ -177,6 +179,7 @@ class SupplierCard:
             "revenue_note": self.revenue_note,
             "checko_url": self.checko_url, "maps_url": self.maps_url,
             "maps_rating": self.maps_rating, "maps_reviews": self.maps_reviews,
+            "product_links": self.product_links, "order_terms": self.order_terms,
             "city": self.city, "region": self.region, "phones": self.phones,
             "emails": self.emails, "description": self.description,
             "categories": self.categories, "price_min": self.price_min,
@@ -379,13 +382,21 @@ def _score_all(cards: list[SupplierCard], serp: list[SerpHit]) -> None:
 
 
 def _apply_contact_facts(card: SupplierCard, facts) -> None:
-    """Контакты с сайта: append без перезаписи (merge = дополнение)."""
+    """Контакты, ссылки на разделы и условия заказа с сайта — дополнением."""
     new_phones = [p for p in facts.phones if p not in card.phones]
     card.phones.extend(new_phones[:2])
     new_emails = [e for e in facts.emails if e not in card.emails]
     card.emails.extend(new_emails[:2])
+    for u in getattr(facts, "product_links", []) or []:
+        if u not in card.product_links:
+            card.product_links.append(u)
+    if not card.order_terms and getattr(facts, "order_terms", None):
+        card.order_terms = facts.order_terms
+        card.sources["условия заказа"] = f"сайт {facts.url}"
     if card.emails or card.phones:
         card.sources.setdefault("контакты", f"сайт {facts.url}")
+    if card.product_links and "разделы" not in card.sources:
+        card.sources["разделы/прайсы"] = f"сайт {facts.url}"
 
 
 def apply_enrichment(card: SupplierCard, facts) -> None:

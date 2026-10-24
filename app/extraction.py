@@ -96,6 +96,8 @@ class SiteFacts:
     match: str = ""                                     # LLM: profile|adjacent|offtopic
     irrelevant: bool = False                            # вычисляется: match == offtopic
     method: str = "regex"                               # regex | llm | failed
+    product_links: list[str] = field(default_factory=list)  # разделы/прайсы по запросу
+    order_terms: str | None = None                        # условия заказа и доставки
     kind: str | None = None                              # производитель/дистрибьютор/магазин
     wholesale: bool | None = None                        # LLM: работает ли с оптом
     rendered: bool = False                               # потребовался ли JS-рендер
@@ -178,6 +180,45 @@ RE_CONTACT_KW = re.compile(
     r"whatsapp|telegram|вайбер|мессендж|график работы)", re.IGNORECASE)
 
 
+
+def extract_product_links(html: str, query: str, base_url: str, limit: int = 2) -> list[str]:
+    """Ссылки на разделы/каталоги/прайсы, релевантные запросу.
+
+    Скоры: совпадение слов запроса в тексте ссылки + bonus за
+    «прайс|каталог|цена|katalog|price» в href/анкоре. Абсолютные URL,
+    только внутренние (тот же домен)."""
+    from urllib.parse import urljoin, urlparse
+    base_host = urlparse(base_url).netloc.removeprefix("www.")
+    tokens = [t for t in re.split(r"\W+", query.lower()) if len(t) > 2]
+    scored: list[tuple[float, str]] = []
+    for m in re.finditer(r'<a[^>]+href="([^"#]+)"[^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL):
+        href, anchor_html = m.group(1), m.group(2)
+        if href.startswith(("mailto:", "tel:", "javascript:", "http")):
+            continue
+        absu = urljoin(base_url, href)
+        host = urlparse(absu).netloc.removeprefix("www.")
+        if host != base_host or absu.rstrip("/") == base_url.rstrip("/"):
+            continue
+        anchor = re.sub(r"<[^>]+>", " ", anchor_html)
+        anchor = re.sub(r"\s+", " ", anchor).strip()
+        if not anchor or len(anchor) > 120:
+            continue
+        blob = (anchor + " " + href).lower()
+        score = sum(1 for t in tokens if t in blob)
+        if re.search(r"прайс|katalog|каталог|цен|price|optov|оптов", blob):
+            score += 2
+        if score >= 2:
+            scored.append((score, absu))
+    scored.sort(key=lambda x: -x[0])
+    out: list[str] = []
+    for _s, u in scored:
+        if u not in out:
+            out.append(u)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def contact_text(full_text: str, limit: int = 8000) -> str:
     """Текст, пригодный для извлечения контактов LLM.
 
@@ -248,6 +289,7 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
   "price_examples": ["цены ТОЛЬКО на искомый товар, в формате как на сайте: '43 руб/шт', 'от 850 руб за кг'"],
   "min_order": "мин. заказ/партия если указан, иначе null",
   "delivery": "условия доставки если указаны, иначе null",
+  "order_terms": "условия заказа: оплата (безнал/нал/отсрочка), самовывоз/ТК/свой транспорт, сроки поставки — если указаны; иначе null",
   "certificates": ["найденные сертификаты/ГОСТы"],
   "phones": ["телефоны"], "emails": ["email"]}}
 
@@ -282,6 +324,7 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
         f.prices = [str(x)[:60] for x in (data.get("price_examples") or [])[:4]]
         f.min_order = (data.get("min_order") or None)
         f.delivery = (data.get("delivery") or None)
+        f.order_terms = (str(data.get("order_terms"))[:250] or None) if data.get("order_terms") else None
         f.certificates = [str(x)[:40] for x in (data.get("certificates") or [])[:4]]
         f.phones = [str(x) for x in (data.get("phones") or [])[:4]]
         f.emails = [str(x) for x in (data.get("emails") or [])[:3]]
@@ -297,6 +340,7 @@ def merge_facts(a: SiteFacts, b: SiteFacts) -> SiteFacts:
     out = a
     out.method = "regex+llm" if a.ok and b.ok else (b.method if b.ok and not a.ok else a.method)
     out.irrelevant = b.irrelevant
+    out.match = b.match or a.match
     out.kind = b.kind or a.kind
     out.wholesale = b.wholesale if b.wholesale is not None else a.wholesale
     out.rendered = a.rendered or b.rendered
@@ -349,26 +393,29 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     facts.ogrn = legal.get("ogrn")
     facts.legal_name = legal.get("legal_name")
 
-    # --- нет email -> типовые страницы контактов ---
+    # --- нет email -> типовые страницы контактов (параллельно) ---
     if not facts.emails:
-        for suffix in ("kontakty", "contacts", "kontakty.html"):
-            contact_html = await fetch_html(url.rstrip("/") + "/" + suffix)
-            if not contact_html:
-                continue
-            contact_text = _text_of(contact_html)
-            if len(contact_text) < 200:  # и там SPA — рендерим
-                contact_html = await render_html(url.rstrip("/") + "/" + suffix) or contact_html
-                contact_text = _text_of(contact_html)
-            contact_facts = regex_facts(url + "/" + suffix, contact_text)
-            for e in contact_facts.emails:
+        import asyncio as _aio
+
+        async def _cpage(suffix: str) -> SiteFacts:
+            c_url = url.rstrip("/") + "/" + suffix
+            contact_html = await fetch_html(c_url)
+            cpage_text = _text_of(contact_html) if contact_html else ""
+            if len(cpage_text) < 200:  # и там SPA — рендерим
+                contact_html = await render_html(c_url) or contact_html
+                cpage_text = _text_of(contact_html)
+            return regex_facts(c_url, cpage_text)
+
+        cf_list = await _aio.gather(*(_cpage(sfx) for sfx in ("kontakty", "contacts", "kontakty.html")))
+        for cf in cf_list:
+            for e in cf.emails:
                 if e not in facts.emails:
                     facts.emails.append(e)
-            for p in contact_facts.phones:
-                if p not in facts.phones:
-                    facts.phones.append(p)
-            if facts.emails:
-                facts.ok = True
-                break
+            for ph in cf.phones:
+                if ph not in facts.phones:
+                    facts.phones.append(ph)
+        if facts.emails or facts.phones:
+            facts.ok = True
 
     # --- два LLM-вызова ПАРАЛЛЕЛЬНО (это половина времени обхода):
     #     1) контакты: гемма по контакт-окнам (футер включён, regex не тянет);
@@ -405,6 +452,8 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         # цены LLM релевантнее regex-мусора из навигации: приоритет LLM
         if llm.prices:
             facts.prices = llm.prices
+    # ссылки на разделы/прайсы по запросу
+    facts.product_links = extract_product_links(html, query, url)
     return facts
 
 
