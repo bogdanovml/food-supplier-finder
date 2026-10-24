@@ -246,7 +246,7 @@ def _pessimize_all(cards) -> None:
     _pessimize_thin(cards)
 
 
-async def _run_company(cards: list, emit: Emit, limit: int = 18) -> None:
+async def _run_company(cards: list, emit: Emit, region_name: str = "", limit: int = 18) -> None:
     """Юрлица: dadata/checko по ИНН/ОГРН/названию + полный опыт 44/223-ФЗ.
 
     Приоритет: (1) карточки с известным ИНН — быстрая валидация ЕГРЮЛ;
@@ -292,12 +292,41 @@ async def _run_company(cards: list, emit: Emit, limit: int = 18) -> None:
                 c.sources["сайт"] = f"ЕГРЮЛ (checko.ru): {d}"
         if cc.get("phones") or cc.get("emails"):
             c.sources["контакты"] = "ЕГРЮЛ: карточка checko.ru"
+        if cc.get("checko_url"):
+            c.checko_url = cc["checko_url"]
 
     ogr_cards = [c for c in cards if c.ogrn and not (c.emails or c.phones)][:25]
     if ogr_cards:
         await emit({"type": "stage", "stage": "company", "status": "run",
                     "message": f"контакты из карточек ЕГРЮЛ: {len(ogr_cards)} юрлиц"})
         await asyncio.gather(*(_fill_contacts(c) for c in ogr_cards))
+
+    # у всех карточек с ОГРН — прямая ссылка на карточку ЕГРЮЛ (через редирект)
+    for c in cards:
+        if c.ogrn and not c.checko_url:
+            c.checko_url = f"https://checko.ru/search?query={c.ogrn}"
+
+    # --- Яндекс Карты: рейтинг и отзывы для топ-карточек в регионе ---
+    from .sources.maps import org_profile
+    from .merge import region_ok as _rok
+    maps_candidates = [c for c in cards
+                        if c.city and _rok(c.city, region_name)
+                        and not c.maps_url][:8]
+    if maps_candidates:
+        await emit({"type": "stage", "stage": "company", "status": "run",
+                    "message": f"Яндекс Карты: рейтинг {len(maps_candidates)} компаний"})
+
+        async def _maps(c):
+            query_name = (c.legal_name or c.name).replace('"', "")
+            prof = await org_profile(query_name, c.city)
+            if prof:
+                c.maps_url = prof.get("url")
+                c.maps_rating = prof.get("rating")
+                c.maps_reviews = prof.get("reviews")
+                c.sources["рейтинг"] = (f"Яндекс Карты: {prof.get('rating')} "
+                                       f"({prof.get('reviews')} отзывов)")
+
+        await asyncio.gather(*(_maps(c) for c in maps_candidates))
 
     for c in top:
         try:
@@ -471,7 +500,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
 
         # --- юрлица: dadata/checko + опыт 44-ФЗ по ИНН ---
-        await _run_company(cards, emit)
+        await _run_company(cards, emit, region_name)
 
         # --- гео-несовпадение: поставщик из другого города при поиске
         #     по городу федерального значения — минус к рейтингу + заметка ---

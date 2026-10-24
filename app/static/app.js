@@ -697,6 +697,29 @@ async function openDossier(row) {
     </div>
 
     <!-- Justification -->
+    ${(supplier.maps_url || supplier.checko_url) ? `
+    <div class="dossier-section">
+      <div class="dossier-section-title">Внешние профили и репутация</div>
+      ${supplier.maps_rating ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Яндекс Карты</span>
+        <span class="dossier-row-value">
+          <span class="rating-badge">${supplier.maps_rating.toFixed(1)}</span>
+          <span class="text-muted small">${supplier.maps_reviews || 0} отзывов</span>
+        </span>
+      </div>` : ""}
+      ${supplier.maps_url ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Профиль на Картах</span>
+        <span class="dossier-row-value"><a href="${escapeHtml(supplier.maps_url)}" target="_blank" class="text-decoration-none">Открыть отзывы и адрес</a></span>
+      </div>` : ""}
+      ${supplier.checko_url ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Карточка ЕГРЮЛ (checko)</span>
+        <span class="dossier-row-value"><a href="${escapeHtml(supplier.checko_url)}" target="_blank" class="text-decoration-none">Реквизиты, учредители, арбитражи</a></span>
+      </div>` : ""}
+    </div>` : ""}
+
     ${supplier.reasons && supplier.reasons.length ? `
     <div class="dossier-section">
       <div class="dossier-section-title">Аналитическое обоснование выбора</div>
@@ -845,6 +868,7 @@ function openComparisonModal() {
         ${makeRow("Стандарты качества", s => (s.certificates && s.certificates.length) ? s.certificates.map(escapeHtml).join(", ") : "Декларация ТР ТС")}
         ${makeRow("Прямой Email", s => (s.emails && s.emails.length) ? `<a href="mailto:${s.emails[0]}">${escapeHtml(s.emails[0])}</a>` : '<span class="text-muted">Не найден</span>')}
         ${makeRow("Телефон", s => (s.phones && s.phones.length) ? escapeHtml(s.phones[0]) : "—")}
+        ${makeRow("Рейтинг (Я.Карты)", s => s.maps_rating ? `<strong>${s.maps_rating.toFixed(1)}</strong> <span class="text-muted small">(${s.maps_reviews || 0} отз.)</span>` : "—")}
         ${makeRow("Обоснование ИИ", s => (s.reasons && s.reasons.length) ? escapeHtml(s.reasons[0]) : "—")}
       </tbody>
     </table>

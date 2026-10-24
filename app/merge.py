@@ -135,6 +135,10 @@ class SupplierCard:
     company_status: str | None = None
     staff: str | None = None
     revenue_note: str | None = None
+    checko_url: str | None = None
+    maps_url: str | None = None
+    maps_rating: float | None = None
+    maps_reviews: int | None = None
     city: str = ""
     region: str = ""
     phones: list[str] = field(default_factory=list)
@@ -165,6 +169,8 @@ class SupplierCard:
             "okved": self.okved, "reg_date": self.reg_date,
             "company_status": self.company_status, "staff": self.staff,
             "revenue_note": self.revenue_note,
+            "checko_url": self.checko_url, "maps_url": self.maps_url,
+            "maps_rating": self.maps_rating, "maps_reviews": self.maps_reviews,
             "city": self.city, "region": self.region, "phones": self.phones,
             "emails": self.emails, "description": self.description,
             "categories": self.categories, "price_min": self.price_min,

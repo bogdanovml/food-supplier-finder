@@ -40,8 +40,11 @@ async def _ensure_browser():
         )
 
 
-async def render_html(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_000) -> str:
-    """Отрендерить страницу браузером. Ошибки/таймауты -> '' (не роняем пайплайн)."""
+async def render_page(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_000) -> tuple[str, str]:
+    """Отрендерить страницу браузером. Возвращает (html, final_url).
+
+    final_url нужен, когда сайт редиректит на профиль организации
+    (Яндекс Карты: /?text=... -> /maps/org/<slug>/<id>/)."""
     try:
         await _ensure_browser()
         page = await _browser.new_page(user_agent=UA, locale="ru-RU")
@@ -50,13 +53,19 @@ async def render_html(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_0
             await page.wait_for_timeout(wait_ms)
             html = await page.content()
             if len(html) > max_bytes:
-                return ""
-            return html
+                return "", url
+            return html, page.url
         finally:
             await page.close()
     except Exception as exc:
-        logger.debug("render_html failed for %s: %s", url, exc)
-        return ""
+        logger.debug("render_page failed for %s: %s", url, exc)
+        return "", url
+
+
+async def render_html(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_000) -> str:
+    """Отрендерить страницу браузером. Ошибки/таймауты -> '' (не роняем пайплайн)."""
+    html, _ = await render_page(url, wait_ms=wait_ms, max_bytes=max_bytes)
+    return html
 
 
 async def close():

@@ -121,7 +121,8 @@ def _conn() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass
         for col in ("legal_name TEXT", "ogrn TEXT", "director TEXT", "okved TEXT",
-                    "reg_date TEXT", "company_status TEXT", "staff TEXT", "revenue_note TEXT"):
+                    "reg_date TEXT", "company_status TEXT", "staff TEXT", "revenue_note TEXT",
+                    "checko_url TEXT", "maps_url TEXT", "maps_rating REAL", "maps_reviews INTEGER"):
             try:
                 conn.execute(f"ALTER TABLE suppliers ADD COLUMN {col}")
                 conn.commit()
@@ -194,6 +195,7 @@ def get_search(search_id: int) -> dict | None:
 SUPPLIER_COLS = [
     "search_id", "name", "domain", "inn", "legal_name", "ogrn", "director",
     "okved", "reg_date", "company_status", "staff", "revenue_note",
+    "checko_url", "maps_url", "maps_rating", "maps_reviews",
     "city", "region", "phones", "emails",
     "site", "description", "categories", "price_min", "price_max", "price_note",
     "min_order", "delivery", "certificates", "gov_contracts_count",

@@ -324,10 +324,21 @@ async def contacts_by_ogrn(ogrn: str) -> dict:
     if not ogrn or not re.match(r"^\d{13}$", ogrn):
         return {}
     out: dict = {}
+    card_url = f"{BASE}/search?query={ogrn}"
     async with _sem:
         async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
                                       headers={"User-Agent": UA}) as client:
-            html = await _fetch(client, f"{BASE}/search?query={ogrn}")
+            try:
+                resp = await client.get(f"{BASE}/search?query={ogrn}")
+                if resp.status_code == 200:
+                    html = resp.text
+                    if "/company/" in str(resp.url):
+                        card_url = str(resp.url)   # карточка после редиректа
+                else:
+                    html = ""
+            except httpx.HTTPError as exc:
+                logger.debug("checko ogrn fetch failed: %s", exc)
+                html = ""
     if not html:
         return {}
     import html as html_mod
@@ -360,4 +371,6 @@ async def contacts_by_ogrn(ogrn: str) -> dict:
     m = re.search(r"Веб-сайт\s+([a-z0-9\-]+\.[a-z0-9\-.]{2,30})\s", text[:80000], re.I)
     if m:
         out["site"] = m.group(1).strip(".")
+    if "/company/" in card_url:
+        out["checko_url"] = card_url
     return out
