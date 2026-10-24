@@ -96,23 +96,60 @@ RE_INN = re.compile(r"ИНН[:\s]*(\d{10,12})")
 RE_OGRN = re.compile(r"ОГРН[:\s]*(\d{13,15})")
 RE_LEGAL = re.compile(
     r"(ООО|АО|ПАО|ЗАО|ИП|АНО|ФГУП|ОАО)\s*«?([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z0-9\-\s.]{2,50})»?")
+# мусорные имена из адресов: «муниципальный округ», «шоссе», «тер. г.»...
+RE_NAME_JUNK = re.compile(
+    r"округ|район|обл(асть)?\b|тер\.?\b|шоссе|улица|ул\.|проспект|д\.\s|дом\b|кварт", re.I)
+RE_IP_FIO = re.compile(r"^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$")
+
+
+def _valid_legal(form: str, name: str) -> str | None:
+    """Валидное юрлицо или None: отсекаем адресный мусор и голые ИП без ФИО."""
+    name = name.strip().strip('"«»').strip()
+    if not (2 < len(name) < 60) or re.match(r"^(опт|руб|кг|шт)$", name.lower()):
+        return None
+    if RE_NAME_JUNK.search(name):
+        return None
+    if form == "ИП" and not RE_IP_FIO.match(name):
+        return None
+    return f"{form} «{name}»"
 
 
 def extract_legal_from_text(text: str) -> dict:
-    """Юрлицо/ИНН/ОГРН из текста сайта (футер, «Реквизиты»)."""
+    """Юрлицо/ИНН/ОГРН из текста сайта.
+
+    Правило контекста (кейс bik-fish.ru): «ООО «Восточный Берег»» на странице
+    может быть чьим угодно — поставщиком, брендом, партнёром. Своё юрлицо
+    компании пишут в РЕКВИЗИТНОМ БЛОКЕ — рядом с ИНН/ОГРН. Поэтому:
+      1. нашли ИНН -> юрлицо ищем только в окне ±250 символов вокруг него;
+      2. не нашли в окне -> не выдумываем имя: ИНН уйдёт в DaData за точным;
+      3. ИНН вообще нет -> первое «ООО...» (низкая уверенность).
+    """
     out: dict = {}
-    m = RE_INN.search(text)
-    if m:
-        out["inn"] = m.group(1)
-    m = RE_OGRN.search(text)
-    if m:
-        out["ogrn"] = m.group(1)
-    m = RE_LEGAL.search(text)
-    if m:
-        form, name = m.group(1), m.group(2).strip().strip('"«»').strip()
-        if 2 < len(name) < 60 and not re.match(r"^(опт|руб|кг|шт)$", name.lower()):
-            out["legal_name"] = f"{form} «{name}»"
+    m_inn = RE_INN.search(text)
+    m_ogrn = RE_OGRN.search(text)
+    if m_ogrn:
+        out["ogrn"] = m_ogrn.group(1)
+    if not m_inn:
+        m = RE_LEGAL.search(text)
+        if m:
+            legal = _valid_legal(m.group(1), m.group(2))
+            if legal:
+                out["legal_name"] = legal
+        return out
+
+    out["inn"] = m_inn.group(1)
+    # юрлицо ТОЛЬКО в реквизитном окне вокруг ИНН
+    lo = max(0, m_inn.start() - 250)
+    hi = min(len(text), m_inn.end() + 250)
+    window = text[lo:hi]
+    for m in RE_LEGAL.finditer(window):
+        legal = _valid_legal(m.group(1), m.group(2))
+        if legal:
+            out["legal_name"] = legal
+            break
     return out
+
+
 
 
 # ------------------------- 2-3. checko -------------------------

@@ -246,19 +246,28 @@ async def _run_company(cards: list, emit: Emit, limit: int = 10) -> None:
     for c in top:
         try:
             info = None
-            if c.inn and not c.legal_name:
+            if c.inn:
+                # ЕГРЮЛ — единственный источник истины: сайт может называть
+                # себя брендом или устаревшим именем. DaData всегда перекрывает.
                 info = await companyinfo_src.by_inn(c.inn)
-            elif c.ogrn and not c.inn:
+            elif c.ogrn:
                 info = await companyinfo_src.by_inn(c.ogrn)   # dadata находит и по ОГРН
                 if info:
                     c.inn = info.inn
                     c.sources["ИНН"] = f"ЕГРЮЛ: найден по ОГРН {c.ogrn}"
-            elif not c.inn and not c.ogrn:
+            elif not c.ogrn:
                 info = await companyinfo_src.by_name(c.name)
+                if info:
+                    c.inn = info.inn
             if info and info.inn:
                 if not c.inn:
                     c.inn = info.inn
                 if not c.legal_name and info.legal_name:
+                    c.legal_name = info.legal_name
+                elif info.legal_name and c.legal_name and info.legal_name.upper() != c.legal_name.upper():
+                    # сайт назвался иначе, чем ЕГРЮЛ (бренд/переименование) —
+                    # показываем оба: ЕГРЮЛ как юрлицо, сайтовое как «бренд»
+                    c.sources["бренд/название сайта"] = f"сайт: {c.legal_name}"
                     c.legal_name = info.legal_name
                 if not c.ogrn and info.ogrn:
                     c.ogrn = info.ogrn
@@ -275,7 +284,7 @@ async def _run_company(cards: list, emit: Emit, limit: int = 10) -> None:
                 src = (info.source_url or "").split("/")[2] if info.source_url else "ЕГРЮЛ"
                 c.sources["юрлицо"] = f"ЕГРЮЛ ({src}): {info.legal_name or c.name}"
                 if info.status and info.status != "Действующая":
-                    c.relevance = max(0, c.relevance - 20)   # ликвидируемся — не кандидат
+                    c.relevance = 0
             # узнав ИНН — проверяем полный опыт 44-ФЗ
             if c.inn and c.gov_contracts_count == 0:
                 stat = await gosplan_src.contracts_by_inn(c.inn, limit=5)
@@ -359,6 +368,18 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
 
         # --- юрлица: dadata/checko + опыт 44-ФЗ по ИНН ---
         await _run_company(cards, emit)
+
+        # --- неактивные юрлица (ликвидированы/в процессе) — НЕ показываем:
+        # поставки от мёртвой компании невозможны, нет смысла в выборке ---
+        before = len(cards)
+        cards = [c for c in cards if not (c.company_status and c.company_status != "Действующая")]
+        excluded = before - len(cards)
+        if excluded:
+            stats["excluded_inactive"] = excluded
+            await emit({"type": "stage", "stage": "company", "status": "done",
+                        "found": sum(1 for c in cards if c.inn),
+                        "message": f"скрыто неактивных юрлиц: {excluded}"})
+
         _pessimize_all(cards)
 
         # --- structure + финальные карточки ---
