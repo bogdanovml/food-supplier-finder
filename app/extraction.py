@@ -370,30 +370,41 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                 facts.ok = True
                 break
 
-    # --- контакты всё ещё нет: гемма по контакт-окнам (включая футер,
-    #     который trafilatura срезает) — regex не тянет вариативность ---
-    if use_llm and not (facts.emails and facts.phones):
-        ct = contact_text(full_text)
-        contact_facts = await llm_contacts(url, ct)
-        if contact_facts.ok:
-            for ph in contact_facts.phones:
-                cleaned = _clean_phone(ph)
-                if cleaned and cleaned not in facts.phones:
-                    facts.phones.append(cleaned)
-            for e in contact_facts.emails:
-                if e not in facts.emails:
-                    facts.emails.append(e)
-            facts.ok = True
-
-    # --- LLM: цены строго по предмету, опт/розница, описание ---
+    # --- два LLM-вызова ПАРАЛЛЕЛЬНО (это половина времени обхода):
+    #     1) контакты: гемма по контакт-окнам (футер включён, regex не тянет);
+    #     2) цены/классификация: gemini по очищенному main content.
+    import asyncio as _aio
     main_text = _main_text(html)
-    if use_llm and len(main_text) > 200:
-        llm = await llm_facts(url, main_text, query)
-        if llm.ok:
-            facts = merge_facts(facts, llm)
-            # цены LLM релевантнее regex-мусора из навигации: приоритет LLM
-            if llm.prices:
-                facts.prices = llm.prices
+    need_contacts_llm = use_llm and not (facts.emails and facts.phones)
+    need_facts_llm = use_llm and len(main_text) > 200
+
+    async def _contacts_call():
+        if not need_contacts_llm:
+            return None
+        return await llm_contacts(url, contact_text(full_text))
+
+    async def _facts_call():
+        if not need_facts_llm:
+            return None
+        return await llm_facts(url, main_text, query)
+
+    contact_facts, llm = await _aio.gather(_contacts_call(), _facts_call())
+
+    if contact_facts and contact_facts.ok:
+        for ph in contact_facts.phones:
+            cleaned = _clean_phone(ph)
+            if cleaned and cleaned not in facts.phones:
+                facts.phones.append(cleaned)
+        for e in contact_facts.emails:
+            if e not in facts.emails:
+                facts.emails.append(e)
+        facts.ok = True
+
+    if llm and llm.ok:
+        facts = merge_facts(facts, llm)
+        # цены LLM релевантнее regex-мусора из навигации: приоритет LLM
+        if llm.prices:
+            facts.prices = llm.prices
     return facts
 
 
