@@ -467,10 +467,9 @@ async def _find_sites_for(cards: list, emit: Emit, limit: int = 60) -> None:
         # запрос строго по полному юрлицу: короткое имя ловит тёзок
         # (кейс «Морфиш» -> мореходный институт morfish.ru) — не используем
         for query in (legal,):
-            # Яндекс XML на ночном тарифе (00:00-06:00 MSK) — если пусто,
-            # пробуем Google: сайт компании есть у обоих в топ-10
+            # Яндекс Live — круглосуточный; Google — фолбэк
             hits: list = []
-            for engine in ("yandex", "google"):
+            for engine in ("yandexlive", "google"):
                 async with sem:
                     try:
                         hits = await serp_src.fetch_serp([query], lr=225, top=10,

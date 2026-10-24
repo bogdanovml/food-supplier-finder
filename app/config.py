@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     xmlstock_user: str = ""
     xmlstock_key: str = ""
     xmlstock_yandex_url: str = ""
+    xmlstock_yandex_live_url: str = ""
     xmlstock_google_url: str = ""
 
     # Госконтракты (Госплан API)
