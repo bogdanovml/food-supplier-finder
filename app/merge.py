@@ -20,7 +20,6 @@ from typing import Any
 
 import tldextract
 from rapidfuzz import fuzz
-
 from .extraction import normalize_price
 from .sources.gosplan import GovSupplier
 from .sources.optlist import OptlistHit
@@ -67,6 +66,23 @@ def domain_key(url: str) -> str:
 
 def is_blacklisted(domain: str) -> bool:
     return domain in DOMAIN_BLACKLIST
+
+
+def _clean_city(raw: str | None) -> str:
+    """Человеческий город или ''. Отсекаем почтовые индексы/мусор."""
+    if not raw:
+        return ""
+    raw = raw.strip().strip(".,").strip()
+    raw = re.sub(r"^г\.?\s*", "", raw, flags=re.IGNORECASE).strip()
+    raw = raw[:1].upper() + raw[1:] if raw else ""
+    # «622018, СВЕРДЛОВСКАЯ ОБЛ...» -> берём первый НЕ-числовой сегмент
+    for part in raw.split(","):
+        part = part.strip()
+        if part and not part.isdigit() and not re.match(r"^\d{5,6}$", part) and len(part) > 2:
+            # не «р-он АМЗ», не индекс: первые буквы — кириллица/латиница
+            if re.match(r"^[А-ЯЁA-Z]", part):
+                return part
+    return ""
 
 
 # «продающие» заголовки — мусорное имя, используем домен
@@ -134,7 +150,7 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSuppl
                       for c in g.contracts[:2]]
         card = SupplierCard(
             name=g.name, inn=g.inn,
-            region=region_name, city=(g.address or "").split(",")[0].strip(),
+            region=region_name, city=_clean_city(g.address),
             description=g.address or "",
             gov_contracts_count=g.count, gov_contracts_value=g.total_value,
             gov_contract_examples=examples,
@@ -267,7 +283,7 @@ def _score_all(cards: list[SupplierCard], serp: list[SerpHit]) -> None:
 
 
 def apply_enrichment(card: SupplierCard, facts) -> None:
-    """Дополнить карточку фактами с сайта (enrichment-слой)."""
+    """Дополнить карточку фактами с сайта + вердикты опт/розница/пустышка."""
     if not facts.ok:
         card.enrichment_status = "skipped"
         return
@@ -276,6 +292,17 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
         card.relevance = max(0, card.relevance - 25)
         return
     card.enrichment_status = "done"
+
+    # --- вердикт опт/розница (LLM) ---
+    if facts.kind and facts.kind != "неясно":
+        card.sources["тип"] = f"сайт: {facts.kind}" + (
+            ", опт" if facts.wholesale else (", розница" if facts.wholesale is False else ""))
+    if facts.wholesale is False:
+        # розничный интернет-магазин — пессимизируем в оптовом поиске
+        card.relevance = max(0, card.relevance - 15)
+    elif facts.wholesale and facts.kind in ("производитель", "дистрибьютор"):
+        card.relevance = min(100, card.relevance + 5)
+
     new_phones = [p for p in facts.phones if p not in card.phones]
     card.phones.extend(new_phones[:2])
     new_emails = [e for e in facts.emails if e not in card.emails]

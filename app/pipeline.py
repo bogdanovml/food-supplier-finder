@@ -189,6 +189,19 @@ def _fallback_reason(card) -> str:
     return "Данные не подтверждены (органика): нужен ручный звонок до запроса КП"
 
 
+def _pessimize_thin(cards) -> None:
+    """Карточки без единого полезного факта — вниз рейтинга.
+
+    Пустышки из органики (JS-оболочки, витрины без данных) не выбрасываем —
+    вдруг сайт заработает, — но и не даём им сидеть выше компаний
+    с реальными ценами и контактами."""
+    for c in cards:
+        useful = (c.emails or c.phones or c.price_min or c.gov_contracts_count
+                  or c.min_order or c.certificates)
+        if not useful and c.enrichment_status != "done":
+            c.relevance = min(c.relevance, 10)
+
+
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
     """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков + реестр."""
     s = get_settings()
@@ -243,6 +256,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         for c in to_enrich:
             if c.enrichment_status == "pending":
                 c.enrichment_status = "failed"
+        _pessimize_thin(cards)
         await emit({"type": "stage", "stage": "enrich", "status": "done",
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
 

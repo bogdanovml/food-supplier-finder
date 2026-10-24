@@ -23,6 +23,7 @@ from trafilatura import extract as traf_extract
 
 from .config import get_settings
 from .llm import ask_json, LLMError
+from .renderer import render_html, THIN_TEXT_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +80,16 @@ class SiteFacts:
     ok: bool = False
     phones: list[str] = field(default_factory=list)
     emails: list[str] = field(default_factory=list)
-    prices: list[str] = field(default_factory=list)      # «42 руб/кг»
+    prices: list[str] = field(default_factory=list)      # «чипсы 43 руб/шт» — по предмету запроса
     min_order: str | None = None
     certificates: list[str] = field(default_factory=list)
     delivery: str | None = None
     description: str | None = None
     irrelevant: bool = False                            # LLM: сайт не про наш товар
     method: str = "regex"                               # regex | llm | failed
+    kind: str | None = None                              # производитель/дистрибьютор/магазин
+    wholesale: bool | None = None                        # LLM: работает ли с оптом
+    rendered: bool = False                               # потребовался ли JS-рендер
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -157,10 +161,11 @@ def regex_facts(url: str, text: str) -> SiteFacts:
 
 
 async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
-    """LLM-слой: понимает контекст, отсекает нерелевантные страницы.
+    """LLM-слой: понимает контекст, отсекает нерелевантные и розничные страницы.
 
     Ключевое отличие от regex: цены извлекаются ТОЛЬКО по предмету запроса
-    (запрос «чипсы» -> «чипсы картофельные 43 ₽/шт»), а не любые ₽ на странице."""
+    (запрос «чипсы» -> «чипсы картофельные 43 ₽/шт»), а не любые ₽ на странице.
+    Плюс вердикт «опт/розница» — фильтр мусора типа интернет-магазинов."""
     f = SiteFacts(url=url, method="llm")
     prompt = f"""Товар, который ищет пользователь: "{query}".
 Ниже — текст с сайта потенциального поставщика. Определи, торгует ли сайт этим
@@ -168,7 +173,9 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
 
 Ответь JSON:
 {{"relevant": true/false,
-  "supplier_kind": "производитель|дистрибьютор|магазин|неясно",
+  "kind": "производитель|дистрибьютор|магазин|неясно",
+  "wholesale": true/false,
+  "wholesale_evidence": "признак оптовой торговли: 'опт', 'мелкий опт', прайс для юрлиц... иначе null",
   "description": "1-2 предложения, чем занимается компания",
   "price_examples": ["цены ТОЛЬКО на искомый товар, в формате как на сайте: '43 руб/шт', 'от 850 руб за кг'"],
   "min_order": "мин. заказ/партия если указан, иначе null",
@@ -176,14 +183,19 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
   "certificates": ["найденные сертификаты/ГОСТы"],
   "phones": ["телефоны"], "emails": ["email"]}}
 
-ВАЖНО: в price_examples включай цены только на "{query}" или его прямые
-варианты. Цены на другие товары, услуги, доставку — НЕ включай.
+ВАЖНО:
+1. В price_examples включай цены только на "{query}" или его прямые
+   варианты. Цены на другие товары, услуги, доставку — НЕ включай.
+2. wholesale=false если сайт продаёт только в розницу частным лицам
+   (нет признаков опта, МOQ, прайса для юрлиц).
 
 Текст сайта (обрезан):
 {text[:HTML_TRIM]}"""
     try:
         data = await ask_json(prompt, smart=True, temperature=0.1)
         f.irrelevant = not bool(data.get("relevant", True))
+        f.kind = (data.get("kind") or data.get("supplier_kind") or "неясно")[:20]
+        f.wholesale = bool(data.get("wholesale")) if "wholesale" in data else None
         f.description = (data.get("description") or "")[:300] or None
         f.prices = [str(x)[:60] for x in (data.get("price_examples") or [])[:4]]
         f.min_order = (data.get("min_order") or None)
@@ -203,6 +215,9 @@ def merge_facts(a: SiteFacts, b: SiteFacts) -> SiteFacts:
     out = a
     out.method = "regex+llm" if a.ok and b.ok else (b.method if b.ok and not a.ok else a.method)
     out.irrelevant = b.irrelevant
+    out.kind = b.kind or a.kind
+    out.wholesale = b.wholesale if b.wholesale is not None else a.wholesale
+    out.rendered = a.rendered or b.rendered
     if b.description and not out.description:
         out.description = b.description
     for p in b.phones:
@@ -223,23 +238,35 @@ def merge_facts(a: SiteFacts, b: SiteFacts) -> SiteFacts:
 
 
 async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFacts:
-    """Полный enrichment одного сайта: fetch -> regex -> LLM (цены по предмету).
-
-    Если на странице нет email — пробуем типовые страницы контактов
-    (/kontakty, /contacts, /o-kompanii): там контакты в 90% случаев."""
+    """Полный enrichment: httpx -> regex -> (JS-рендер если SPA-оболочка)
+    -> страницы контактов -> LLM (цены по предмету + опт/розница)."""
     html = await fetch_html(url)
     if not html:
         return SiteFacts(url=url, method="failed")
     full_text = _text_of(html)
     facts = regex_facts(url, full_text)
 
-    # нет email -> вторая попытка со страницей контактов
+    # --- JS-оболочка? видимого текста критически мало -> рендер браузером.
+    # (regex-«цены» из навигации не считаем данными: после рендера переизвлекаем)
+    if len(full_text) < THIN_TEXT_THRESHOLD:
+        rendered = await render_html(url)
+        if rendered:
+            html = rendered
+            full_text = _text_of(html)
+            facts = regex_facts(url, full_text)
+            facts.rendered = True
+
+    # --- нет email -> типовые страницы контактов ---
     if not facts.emails:
         for suffix in ("kontakty", "contacts", "kontakty.html"):
             contact_html = await fetch_html(url.rstrip("/") + "/" + suffix)
             if not contact_html:
                 continue
-            contact_facts = regex_facts(url + "/" + suffix, _text_of(contact_html))
+            contact_text = _text_of(contact_html)
+            if len(contact_text) < 200:  # и там SPA — рендерим
+                contact_html = await render_html(url.rstrip("/") + "/" + suffix) or contact_html
+                contact_text = _text_of(contact_html)
+            contact_facts = regex_facts(url + "/" + suffix, contact_text)
             for e in contact_facts.emails:
                 if e not in facts.emails:
                     facts.emails.append(e)
@@ -250,13 +277,13 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                 facts.ok = True
                 break
 
-    # LLM: цены строго по предмету запроса (главный источник цен),
-    # плюс описание/МОК/сертификаты которые regex не видит
-    if use_llm and len(_text_of(html)) > 200:
-        llm = await llm_facts(url, _main_text(html), query)
+    # --- LLM: цены строго по предмету, опт/розница, описание ---
+    main_text = _main_text(html)
+    if use_llm and len(main_text) > 200:
+        llm = await llm_facts(url, main_text, query)
         if llm.ok:
             facts = merge_facts(facts, llm)
-            # цены LLM релевантнее regex-мусора с навигации: приоритет LLM
+            # цены LLM релевантнее regex-мусора из навигации: приоритет LLM
             if llm.prices:
                 facts.prices = llm.prices
     return facts

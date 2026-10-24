@@ -366,11 +366,15 @@ function buildTable() {
       {
         title: "Город",
         field: "city",
-        width: 100,
+        width: 110,
         headerSort: true,
+        sorter: "string",
         formatter: (cell) => {
           const d = cell.getData();
-          return escapeHtml(d.city || d.region || "—");
+          const val = d.city || d.region || "";
+          if (!val) return '<span class="text-muted">—</span>';
+          // мусорные города (индексы/мусор) показываем приглушённо как регион
+          return /^[А-ЯЁA-Z]/.test(val) ? escapeHtml(val) : escapeHtml(d.region || "—");
         }
       },
       {
@@ -415,6 +419,7 @@ function buildTable() {
         width: 100,
         hozAlign: "center",
         headerSort: true,
+        sorter: "number",
         formatter: (cell) => {
           const d = cell.getData();
           if (!d.gov_contracts_count) return '<span class="text-muted">—</span>';
@@ -456,6 +461,7 @@ function buildTable() {
         width: 75,
         hozAlign: "center",
         headerSort: true,
+        sorter: "number",
         formatter: (cell) => {
           const val = Number(cell.getValue()) || 0;
           return `<span class="fw-bold">${val}</span><span class="text-muted small">/100</span>`;
