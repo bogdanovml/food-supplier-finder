@@ -322,6 +322,7 @@ def _absorb_optlist(card: SupplierCard, oh: OptlistHit) -> None:
         card.sources["email"] = f"optlist.ru/company/{oh.slug}"
     if oh.phone_masked and oh.phone_masked not in card.phones:
         card.phones.append(oh.phone_masked)
+        card.sources["телефон (скрыт)"] = "optlist.ru: полный номер виден после регистрации"
     if oh.min_order and not card.min_order:
         card.min_order = oh.min_order
         card.sources["мин. заказ"] = f"optlist.ru/company/{oh.slug}"
