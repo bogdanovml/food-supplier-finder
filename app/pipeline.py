@@ -262,9 +262,12 @@ async def _resolve_legal(cards: list, emit: Emit, limit: int = 30) -> None:
     deficient = [c for c in cards
                  if c.inn or not c.ogrn or not c.legal_name or not c.company_status]
     with_inn = [c for c in deficient if c.inn]
-    rest = [c for c in deficient if not c.inn]
-    rest.sort(key=lambda c: (c.relevance + (10 if c.domain else 0)), reverse=True)
-    top = (with_inn + rest)[:limit]
+    # домен-карточки резолвим ВСЕ: бренд-лукап — 1 дешёвый DaData-запрос,
+    # а карточка без юрлица для закупщика бесполезна (принцип «обрубка»)
+    with_domain = [c for c in deficient if not c.inn and c.domain]
+    rest = [c for c in deficient if not c.inn and not c.domain]
+    rest.sort(key=lambda c: c.relevance, reverse=True)
+    top = (with_inn + with_domain + rest)[:limit]
     for c in top:
         try:
             info = None
@@ -587,7 +590,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
 
         # --- 1. Идентификаторы и статус: ЕГРЮЛ через DaData (метрованный
         #     API — единственный осознанный потолок), гособход 44/223-ФЗ ---
-        await _resolve_legal(cards, emit, limit=30)
+        await _resolve_legal(cards, emit, limit=60)
 
         # --- 2. Неактивные юрлица — сразу вон: нет смысла тратить обходы ---
         before = len(cards)
@@ -674,6 +677,17 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         await _maps_pass(cards, emit, region_name)
         await emit({"type": "stage", "stage": "company", "status": "done",
                     "found": sum(1 for c in cards if c.inn)})
+
+        # --- карточки БЕЗ юрлица (ИНН/ОГРН) не показываем: для закупщика
+        #     аноним «interfoodgroup.ru» = обрубок телефона — с ним ничего
+        #     нельзя сделать (ни договор, ни проверку, ни оплату) ---
+        before_no_legal = len(cards)
+        cards = [c for c in cards if c.inn or c.ogrn]
+        excluded_no_legal = before_no_legal - len(cards)
+        if excluded_no_legal:
+            stats["excluded_no_legal"] = excluded_no_legal
+            await emit({"type": "stage", "stage": "company", "status": "run",
+                        "message": f"скрыто карточек без юрлица: {excluded_no_legal}"})
 
         _pessimize_all(cards)
 
