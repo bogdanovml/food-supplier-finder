@@ -234,6 +234,29 @@ def extract_product_links(html: str, query: str, base_url: str, limit: int = 2) 
     return out
 
 
+
+# коды крупнейших городов (мобильные 9xx не матчатся — только стационарные)
+PHONE_CODE_CITIES: dict[str, str] = {
+    "495": "Москва", "499": "Москва", "498": "Москва",
+    "812": "Санкт-Петербург",
+    "343": "Екатеринбург", "342": "Пермь", "383": "Новосибирск",
+    "861": "Краснодар", "863": "Ростов-на-Дону",
+    "843": "Казань", "846": "Самара", "831": "Нижний Новгород",
+    "351": "Челябинск", "381": "Омск", "347": "Уфа",
+    "391": "Красноярск", "423": "Владивосток", "473": "Воронеж",
+    "421": "Хабаровск", "395": "Иркутск", "341": "Ижевск",
+    "836": "Йошкар-Ола", "867": "Владикавказ",
+}
+
+
+def _city_from_phone(phone: str | None) -> str | None:
+    """Город по стационарному коду: +7 (342)... -> Пермь."""
+    if not phone:
+        return None
+    m = re.search(r"\+7\s*\((\d{3})\)", phone)
+    return PHONE_CODE_CITIES.get(m.group(1)) if m else None
+
+
 def contact_text(full_text: str, limit: int = 8000) -> str:
     """Текст, пригодный для извлечения контактов LLM.
 
@@ -267,9 +290,10 @@ async def llm_contacts(url: str, text: str) -> SiteFacts:
 
 Ответь СТРОГО JSON:
 {{"phones": ["телефоны в формате как на сайте"], "emails": ["email"],
-  "messengers": ["whatsapp/telegram если есть"]}}
+  "messengers": ["whatsapp/telegram если есть"],
+  "city": "ГОРОД компании по адресу склада/офиса/реквизитам на странице (НЕ город покупателя!); null если не указан"}}
 
-Если чего-то нет — пустой массив. Не выдумывай.
+Если чего-то нет — пустой массив/null. Не выдумывай.
 
 Текст:
 {text[:6000]}"""
@@ -277,6 +301,7 @@ async def llm_contacts(url: str, text: str) -> SiteFacts:
         data = await ask_json(prompt, smart=False, temperature=0.1, max_tokens=400)
         f.phones = [str(x)[:25] for x in (data.get("phones") or [])][:3]
         f.emails = [str(x).lower()[:60] for x in (data.get("emails") or [])][:2]
+        f.city = (str(data.get("city")).strip()[:40] or None) if data.get("city") else None
         if f.phones or f.emails:
             f.ok = True
     except LLMError as exc:
@@ -470,7 +495,13 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         for e in contact_facts.emails:
             if e not in facts.emails:
                 facts.emails.append(e)
+        if contact_facts.city:
+            facts.city = contact_facts.city
         facts.ok = True
+    # город по коду стационарного телефона — надёжнее каталога (кейс
+    # «Русская Рыба»: каталог дал Москву, телефоны +7 (342) Пермь)
+    if not facts.city and facts.phones:
+        facts.city = _city_from_phone(facts.phones[0]) or facts.city
 
     if llm and llm.ok:
         facts = merge_facts(facts, llm)
