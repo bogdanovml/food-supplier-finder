@@ -123,6 +123,12 @@ async def api_registry_stats():
     return db.registry_stats()
 
 
+@app.get("/api/searches/{search_id}/excluded")
+async def api_excluded(search_id: int):
+    """Отсеянные карточки с причинами (вкладка прозрачности)."""
+    return db.get_excluded(search_id)
+
+
 @app.get("/api/searches/{search_id}/suppliers")
 async def api_suppliers(search_id: int):
     return db.get_suppliers(search_id)

@@ -594,6 +594,10 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
 
         # --- 2. Неактивные юрлица — сразу вон: нет смысла тратить обходы ---
         before = len(cards)
+        inactive = [c for c in cards
+                    if c.company_status and c.company_status != "Действующая"]
+        if inactive:
+            db.insert_excluded(search_id, [_row(c) for c in inactive], "inactive")
         cards = [c for c in cards
                  if not (c.company_status and c.company_status != "Действующая")]
         excluded = before - len(cards)
@@ -665,6 +669,9 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                 c.sources["гео"] = f"{c.city} — вне региона запроса ({region_name})"
                 geo_mismatches += 1
             kept_geo.append(c)
+        geo_dump = [c for c in cards if c not in kept_geo]
+        if geo_dump:
+            db.insert_excluded(search_id, [_row(c) for c in geo_dump], "geo")
         excluded_geo = len(cards) - len(kept_geo)
         if excluded_geo:
             stats["excluded_geo"] = excluded_geo
@@ -682,8 +689,11 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         #     аноним «interfoodgroup.ru» = обрубок телефона — с ним ничего
         #     нельзя сделать (ни договор, ни проверку, ни оплату) ---
         before_no_legal = len(cards)
+        no_legal = [c for c in cards if not (c.inn or c.ogrn)]
+        if no_legal:
+            db.insert_excluded(search_id, [_row(c) for c in no_legal], "no_legal")
         cards = [c for c in cards if c.inn or c.ogrn]
-        excluded_no_legal = before_no_legal - len(cards)
+        excluded_no_legal = len(no_legal)
         if excluded_no_legal:
             stats["excluded_no_legal"] = excluded_no_legal
             await emit({"type": "stage", "stage": "company", "status": "run",

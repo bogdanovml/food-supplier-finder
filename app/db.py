@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS checko_cache (
     json TEXT NOT NULL,
     fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS excluded (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    search_id INTEGER NOT NULL REFERENCES searches(id),
+    name TEXT NOT NULL,
+    domain TEXT,
+    city TEXT,
+    inn TEXT,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_excluded_search ON excluded(search_id);
 CREATE TABLE IF NOT EXISTS registry (
     key TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -396,3 +407,38 @@ def checko_cache_put(ref: str, data: dict) -> None:
         c.execute("INSERT OR REPLACE INTO checko_cache (ref, json, fetched_at) VALUES (?,?,?)",
                   (ref, _j(data), _now()))
         c.commit()
+
+
+# ------------------------------ отсеянные карточки ------------------------------
+
+REASON_LABELS = {
+    "no_legal": "Нет юрлица (ИНН/ОГРН не найдены)",
+    "inactive": "Юрлицо неактивно (ликвидация/реорганизация)",
+    "geo": "Другой город при поиске по федеральному городу",
+}
+
+
+def insert_excluded(search_id: int, cards: list, reason: str) -> None:
+    """Отсеянные карточки — для вкладки прозрачности."""
+    with db() as c:
+        for card in cards:
+            c.execute(
+                "INSERT INTO excluded (search_id, name, domain, city, inn, reason, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (search_id, card.get("name") or "?", card.get("domain"),
+                 card.get("city"), card.get("inn"), reason, _now()),
+            )
+        c.commit()
+
+
+def get_excluded(search_id: int) -> list[dict]:
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM excluded WHERE search_id=? ORDER BY id", (search_id,)
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["reason_label"] = REASON_LABELS.get(d.get("reason"), d.get("reason"))
+            out.append(d)
+        return out

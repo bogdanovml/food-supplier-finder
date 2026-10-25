@@ -106,6 +106,8 @@ function setupEventListeners() {
   document.getElementById("rfq-send-btn").addEventListener("click", dispatchRfqSmtp);
   document.getElementById("rfq-mailto-btn").addEventListener("click", dispatchRfqMailto);
   document.getElementById("btn-registry").addEventListener("click", openRegistry);
+  document.getElementById("tab-results").addEventListener("click", () => switchView("results"));
+  document.getElementById("tab-excluded").addEventListener("click", () => switchView("excluded"));
 
   // Filter pills
   document.querySelectorAll("#filter-pills button").forEach(btn => {
@@ -132,6 +134,7 @@ async function onStartSearch(e) {
 
   // гео-фильтр «В регионе» включен по умолчанию для городов федерального значения
   setDefaultFilter(isFederalCityRegion(region) ? "region" : "all");
+  currentView = "excluded"; switchView("results"); // сброс вкладки на «Результаты»
 
   // UI state transition
   document.getElementById("zero-state").classList.add("d-none");
@@ -1115,5 +1118,59 @@ async function openRegistry() {
     modal.show();
   } catch (err) {
     alert("Не удалось загрузить базу поставщиков: " + err.message);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Вкладка «Отсеянные» — прозрачность фильтрации качества
+   -------------------------------------------------------------------------- */
+let resultsColumnsBackup = null;
+let currentView = "results";
+
+async function switchView(view) {
+  if (view === currentView) return;
+  currentView = view;
+  document.getElementById("tab-results").className =
+    view === "results" ? "btn btn-success active" : "btn btn-outline-success";
+  document.getElementById("tab-excluded").className =
+    view === "excluded" ? "btn btn-success active" : "btn btn-outline-success";
+
+  if (view === "excluded") {
+    if (!currentSearchId) return;
+    const res = await fetch(`/api/searches/${currentSearchId}/excluded`);
+    const excluded = await res.json();
+    // бэкап колонок и подмена на «причинные»
+    if (!resultsColumnsBackup) {
+      resultsColumnsBackup = table.getColumns().map(c => c.getDefinition());
+    }
+    table.setColumns([
+      { title: "Поставщик", field: "name", widthGrow: 2, formatter: (cell) =>
+          `<div class="fw-semibold">${escapeHtml(cell.getValue())}</div>` },
+      { title: "Город", field: "city", width: 110, formatter: (c) =>
+          escapeHtml(c.getValue() || "—") },
+      { title: "Домен", field: "domain", widthGrow: 1.2, formatter: (c) =>
+          c.getValue() ? `<span class="font-monospace small">${escapeHtml(c.getValue())}</span>` : "—" },
+      { title: "ИНН", field: "inn", width: 120, formatter: (c) =>
+          c.getValue() ? `<span class="font-monospace small">${escapeHtml(c.getValue())}</span>` : "—" },
+      { title: "Причина отсева", field: "reason", widthGrow: 1.5, formatter: (cell) => {
+          const r = cell.getValue();
+          const map = {
+            no_legal:  ["bg-secondary", "Нет юрлица (ИНН/ОГРН не найдены)"],
+            inactive:  ["bg-danger", "Юрлицо неактивно"],
+            geo:       ["bg-warning text-dark", "Другой город"],
+          };
+          const [cls, label] = map[r] || ["bg-secondary", r];
+          return `<span class="badge ${cls}">${label}</span>`;
+        } },
+    ]);
+    table.setData(excluded);
+    document.getElementById("btn-compare").disabled = true;
+    document.getElementById("btn-rfq").disabled = true;
+  } else {
+    if (resultsColumnsBackup) {
+      table.setColumns(resultsColumnsBackup);
+    }
+    updateTableData();
+    updateSelectionState();
   }
 }
