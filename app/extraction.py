@@ -510,6 +510,35 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             facts.prices = llm.prices
     # ссылки на разделы/прайсы по запросу
     facts.product_links = extract_product_links(html, query, url)
+
+    # --- дефицит цен на главной -> обход до 2 прайс-разделов:
+    #     у оптовиков цены почти никогда не на главной, а в каталоге/прайсе ---
+    if use_llm and not facts.prices and facts.product_links:
+        fetched = []
+        for pl in facts.product_links[:2]:
+            try:
+                sub_html = await fetch_html(pl)
+                if not sub_html:
+                    continue
+                sub_text = _main_text(sub_html)
+                if len(sub_text) < 200:
+                    continue
+                sub = await llm_facts(pl, sub_text, query)
+                fetched.append(sub)
+                if sub.prices:
+                    facts.prices = sub.prices
+                    facts.method = "llm+price-page"
+                    break
+                for ph in sub.phones:
+                    if _clean_phone(ph) and _clean_phone(ph) not in facts.phones:
+                        facts.phones.append(_clean_phone(ph))
+                for e in sub.emails:
+                    if e not in facts.emails:
+                        facts.emails.append(e)
+                if sub.city and not facts.city:
+                    facts.city = sub.city
+            except Exception:
+                continue
     return facts
 
 

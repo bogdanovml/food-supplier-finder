@@ -144,6 +144,7 @@ def _conn() -> sqlite3.Connection:
         for col in ("legal_name TEXT", "ogrn TEXT", "director TEXT", "okved TEXT",
                     "reg_date TEXT", "company_status TEXT", "staff TEXT", "revenue_note TEXT",
                     "profit_note TEXT",
+                    "assets_note TEXT",
                     "checko_url TEXT", "maps_url TEXT", "maps_rating REAL", "maps_reviews INTEGER",
                     "product_links TEXT", "order_terms TEXT"):
             try:
@@ -217,7 +218,7 @@ def get_search(search_id: int) -> dict | None:
 
 SUPPLIER_COLS = [
     "search_id", "name", "domain", "inn", "legal_name", "ogrn", "director",
-    "okved", "reg_date", "company_status", "staff", "revenue_note", "profit_note",
+    "okved", "reg_date", "company_status", "staff", "revenue_note", "profit_note", "assets_note",
     "checko_url", "maps_url", "maps_rating", "maps_reviews",
     "product_links", "order_terms",
     "city", "region", "phones", "emails",

@@ -635,6 +635,11 @@ async function openDossier(row) {
         <span class="dossier-row-label">Чистая прибыль</span>
         <span class="dossier-row-value fw-semibold ${supplier.profit_note.startsWith("убыток") ? "text-danger" : "text-success"}">${escapeHtml(supplier.profit_note)}</span>
       </div>` : ""}
+      ${supplier.assets_note ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Активы</span>
+        <span class="dossier-row-value fw-semibold">${escapeHtml(supplier.assets_note)}</span>
+      </div>` : ""}
       ${supplier.staff ? `
       <div class="dossier-row">
         <span class="dossier-row-label">Штат</span>

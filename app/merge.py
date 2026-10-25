@@ -142,6 +142,7 @@ class SupplierCard:
     staff: str | None = None
     revenue_note: str | None = None
     profit_note: str | None = None
+    assets_note: str | None = None
     checko_url: str | None = None
     maps_url: str | None = None
     maps_rating: float | None = None
@@ -179,6 +180,7 @@ class SupplierCard:
             "company_status": self.company_status, "staff": self.staff,
             "revenue_note": self.revenue_note,
             "profit_note": self.profit_note,
+            "assets_note": self.assets_note,
             "checko_url": self.checko_url, "maps_url": self.maps_url,
             "maps_rating": self.maps_rating, "maps_reviews": self.maps_reviews,
             "product_links": self.product_links, "order_terms": self.order_terms,

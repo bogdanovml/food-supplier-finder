@@ -173,6 +173,10 @@ async def enrich_companies(cards, emit=None) -> int:
                     rent = round(np / det["revenue"] * 100, 1)
                     c.profit_note += f" (рентабельность {rent}%)"
                 c.sources["прибыль"] = f"ФНС БФО (bo.nalog.gov.ru): {c.profit_note}"
+            if det and det.get("assets") and not getattr(c, "assets_note", None):
+                yr = f" ({det['period']})" if det.get("period") else ""
+                c.assets_note = f"{fmt_sum(int(det['assets'])) or '—'}{yr}"
+                c.sources["активы"] = f"ФНС БФО (баланс, стр. 1600): {c.assets_note}"
             await asyncio.sleep(0.3)
         if prof["status"] and prof["status"] != "Действующая":
             c.relevance = 0  # фильтр неактивных исключит и запишет причину
