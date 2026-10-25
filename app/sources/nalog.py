@@ -38,7 +38,8 @@ def fmt_sum(rub: int | None) -> str | None:
     if rub >= 1_000_000:
         return f"{rub / 1_000_000:.1f} млн ₽".replace(".", ",")
     if rub >= 1_000:
-        return f"{rub // 1_000} тыс ₽"
+        v = rub / 1_000
+        return f"{v:.1f} тыс ₽".replace(".0", "").replace(".", ",")
     return f"{rub} ₽"
 
 
@@ -79,6 +80,7 @@ async def company_profile_by_inn(inn: str) -> dict | None:
                     continue
                 bfo = item.get("bfo") or {}
                 prof = {
+                    "id": item.get("id"),
                     "name": re.sub(r"<[^>]+>", "", item.get("shortName") or ""),
                     "status": "Действующая"
                     if item.get("statusCode") == "ACTIVE" else item.get("statusCode"),
@@ -98,6 +100,38 @@ async def company_profile_by_inn(inn: str) -> dict | None:
                 return prof
     except Exception as exc:
         logger.debug("bo.nalog %s failed: %s", inn, exc)
+    return None
+
+
+async def report_details(org_id: int, year: str | None = None) -> dict | None:
+    """Формы 1/2 отчётности: чистая прибыль (2400), активы (1600).
+    Тот же открытый ресурс, второй запрос по id организации."""
+    try:
+        async with httpx.AsyncClient(
+                timeout=httpx.Timeout(20, connect=10), verify=False) as hc:
+            url = f"{BO_BASE}/nbo/organizations/{org_id}/bfo"
+            if year:
+                url += f"?year={year}"
+            r = await hc.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 Chrome/156.0 Safari/537.36",
+                "Accept": "application/json",
+                "Referer": f"{BO_BASE}/",
+            })
+            if r.status_code != 200 or not r.json():
+                return None
+            bfo = r.json()[0]
+            fr = (bfo.get("typeCorrections") or [{}])[0].get("correction") or {}
+            fin = fr.get("financialResult") or {}
+            bal = fr.get("balance") or {}
+            return {
+                "net_profit": fin.get("current2400"),
+                "revenue": fin.get("current2110"),
+                "assets": bal.get("current1600") or bfo.get("actives"),
+                "period": bfo.get("period"),
+            }
+    except Exception as exc:
+        logger.debug("bo.nalog details %s failed: %s", org_id, exc)
     return None
 
 
@@ -126,6 +160,19 @@ async def enrich_companies(cards, emit=None) -> int:
                 f"ФНС БФО (bo.nalog.gov.ru): {c.revenue_note}"
             )
             updated += 1
+        # --- чистая прибыль: форма 2, стр. 2400 (убыток = красный флаг) ---
+        if not getattr(c, "profit_note", None) and prof.get("id"):
+            det = await report_details(prof["id"], prof.get("revenue_year"))
+            if det and det.get("net_profit") is not None:
+                np = det["net_profit"]
+                word, sign = ("прибыль", "") if np >= 0 else ("убыток", "-")
+                year = f" ({det['period']})" if det.get("period") else ""
+                c.profit_note = f"{word} {fmt_sum(abs(np)) or 0}{year}"
+                if np < 0 and det.get("revenue") and det["revenue"] > 0:
+                    rent = round(np / det["revenue"] * 100, 1)
+                    c.profit_note += f" (рентабельность {rent}%)"
+                c.sources["прибыль"] = f"ФНС БФО (bo.nalog.gov.ru): {c.profit_note}"
+            await asyncio.sleep(0.3)
         if prof["status"] and prof["status"] != "Действующая":
             c.relevance = 0  # фильтр неактивных исключит и запишет причину
         await asyncio.sleep(0.3)  # вежливость к официальному ресурсу

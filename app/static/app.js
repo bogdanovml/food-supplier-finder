@@ -466,7 +466,11 @@ function buildTable() {
             bits.push(`<span class="trust-chip trust-gov" title="Исполненные контракты 44-ФЗ: ${d.gov_contracts_count} шт на ${(d.gov_contracts_value || 0).toLocaleString('ru')} ₽">44-ФЗ: ${d.gov_contracts_count}</span>`);
           }
           if (d.revenue_note) {
-            bits.push(`<span class="trust-chip trust-rev" title="Выручка по ЕГРЮЛ">Оборот: ${escapeHtml(d.revenue_note)}</span>`);
+            bits.push(`<span class="trust-chip trust-rev" title="Выручка по отчётности ФНС БФО">Оборот: ${escapeHtml(d.revenue_note)}</span>`);
+          }
+          if (d.profit_note) {
+            const loss = d.profit_note.startsWith("убыток");
+            bits.push(`<span class="trust-chip ${loss ? "trust-risk" : "trust-ok"}" title="Чистая прибыль по отчётности ФНС БФО (форма 2, стр. 2400)">${loss ? "⚠ " : ""}${escapeHtml(d.profit_note)}</span>`);
           }
           if (d.maps_rating) {
             bits.push(`<span class="trust-chip trust-map" title="Рейтинг на Яндекс Картах, ${d.maps_reviews || 0} отзывов">Карта: ${d.maps_rating.toFixed(1)}</span>`);
@@ -625,6 +629,11 @@ async function openDossier(row) {
       <div class="dossier-row">
         <span class="dossier-row-label">Выручка</span>
         <span class="dossier-row-value fw-semibold">${escapeHtml(supplier.revenue_note)}</span>
+      </div>` : ""}
+      ${supplier.profit_note ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Чистая прибыль</span>
+        <span class="dossier-row-value fw-semibold ${supplier.profit_note.startsWith("убыток") ? "text-danger" : "text-success"}">${escapeHtml(supplier.profit_note)}</span>
       </div>` : ""}
       ${supplier.staff ? `
       <div class="dossier-row">
