@@ -413,6 +413,33 @@ async def llm_contacts(url: str, text: str) -> SiteFacts:
     return f
 
 
+
+
+async def llm_delivery(url: str, text: str) -> str | None:
+    """Условия доставки выжимкой: география, бесплатность/порог, сроки,
+    транспорт. Regex даёт обрывки вроде «доставка готовых рационов...» —
+    закупщику нужна суть, а не первая строка с кейвордом."""
+    if len(text) < 120:
+        return None
+    prompt = f"""Из текста страницы сайта оптового поставщика извлеки УСЛОВИЯ ДОСТАВКИ И ОПЛАТЫ.
+Сведи в 1-2 предложения 220 символов максимум: география доставки (город/регион),
+стоимость или порог бесплатной доставки, сроки, самовывоз, транспортные компании,
+условия оплаты (нал/безнал/отсрочка) если есть.
+
+Ответ СТРОГО JSON: {{"delivery": "сводка условий или null"}}
+
+Текст:
+{text[:7000]}"""
+    try:
+        data = await ask_json(prompt, smart=False, temperature=0.1, max_tokens=250)
+        d = (data or {}).get("delivery")
+        if isinstance(d, str) and len(d.strip()) > 10:
+            return d.strip()[:240]
+    except LLMError as exc:
+        logger.debug("llm_delivery failed for %s: %s", url, exc)
+    return None
+
+
 async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
     """LLM-слой: понимает контекст, отсекает нерелевантные и розничные страницы.
 
@@ -613,8 +640,8 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         except Exception:
             pass
 
-    # --- дефицит доставки -> адресная страница доставки/оплаты ---
-    if (not facts.delivery or not facts.order_terms) and link_cats["delivery"]:
+    # --- дефицит доставки -> адресная страница доставки/оплаты + LLM-выжимка ---
+    if use_llm and (not facts.delivery or not facts.order_terms) and link_cats["delivery"]:
         try:
             dtext = _text_of(await fetch_html(link_cats["delivery"][0]) or "")
             df = regex_facts(url, dtext)
@@ -624,6 +651,23 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                 facts.order_terms = df.order_terms
             if df.min_order and not facts.min_order:
                 facts.min_order = df.min_order
+            # выжимка условий: regex-обрывки хуже понимания всей страницы
+            if dtext:
+                summary = await llm_delivery(url, dtext)
+                if summary:
+                    facts.delivery = summary
+                    facts.ok = True
+        except Exception:
+            pass
+    # нет адресной страницы (или regex-обрывок) -> выжимка из главной:
+    # «Доставка партии любого объема...» — это хвост навигационной строки,
+    # закупщику нужна суть: география, порог бесплатности, сроки
+    if use_llm and (not facts.delivery or len(facts.delivery) < 150) \
+            and len(full_text) > 400:
+        try:
+            summary = await llm_delivery(url, _main_text(html))
+            if summary:
+                facts.delivery = summary
         except Exception:
             pass
 
