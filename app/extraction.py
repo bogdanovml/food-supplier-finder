@@ -701,6 +701,8 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                     facts.city = sub.city
             except Exception:
                 continue
+    # финальная полировка: мусор «0 ₽» из regex-навигации не показываем
+    facts.prices = _polish_prices(facts.prices)
     return facts
 
 
