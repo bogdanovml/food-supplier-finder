@@ -656,6 +656,14 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         #     API — единственный осознанный потолок), гособход 44/223-ФЗ ---
         await _resolve_legal(cards, emit, limit=60)
 
+        # --- 1.5 ФНС БФО: официальный статус + выручка по ИНН
+        #     (bo.nalog.gov.ru, без ключей; статус кормит фильтр неактивных) ---
+        from app.sources import nalog as nalog_src
+        n_f = await nalog_src.enrich_companies(cards, emit)
+        if n_f:
+            await emit({"type": "stage", "stage": "company", "status": "run",
+                        "message": f"ФНС БФО: выручка получена для {n_f} юрлиц"})
+
         # --- 2. Неактивные юрлица — сразу вон: нет смысла тратить обходы ---
         before = len(cards)
         inactive = [c for c in cards

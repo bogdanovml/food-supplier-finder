@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS checko_cache (
     json TEXT NOT NULL,
     fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nalog_cache (
+    inn TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS excluded (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     search_id INTEGER NOT NULL REFERENCES searches(id),
