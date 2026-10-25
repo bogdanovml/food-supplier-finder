@@ -1019,6 +1019,12 @@ window.restoreSearch = async function (e, searchId) {
     document.getElementById("progress-section").classList.add("d-none");
     document.getElementById("results-section").classList.remove("d-none");
 
+    // гео-фильтр «В регионе» — по умолчанию для городов федерального значения,
+    // и на восстановлении тоже: старые поиски содержат карточки до
+    // серверного гео-исключения, фильтр прячет их клиентски
+    if (s && s.region) {
+      setDefaultFilter(isFederalCityRegion(s.region) ? "region" : "all");
+    }
     updateTableData();
     let durationSec = null;
     try {
