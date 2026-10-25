@@ -25,6 +25,7 @@ from .config import get_settings
 from .llm import ask_json, LLMError
 from .renderer import render_html, THIN_TEXT_THRESHOLD
 from .sources.companyinfo import extract_legal_from_text
+from .llm import ask_json
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +195,109 @@ RE_CONTACT_KW = re.compile(
     r"(контакт|телефон|тел\.|почт|email|e-mail|связать|позвон|адрес\b|офис|"
     r"whatsapp|telegram|вайбер|мессендж|график работы)", re.IGNORECASE)
 
+
+
+
+
+# ---------------------- классификация ссылок главной страницы ----------------------
+# Все внутренние ссылки с якорями -> словарь по категориям (цены/контакты/
+# реквизиты/доставка); недостающие категории добирает LLM (дешёвый проход).
+from urllib.parse import urljoin as _uj, urlparse as _up
+
+_LINK_RULES: list[tuple[str, re.Pattern]] = [
+    ("prices", re.compile(r"прайс|цен[аык]|price|katalog|каталог|продук|товар|опт", re.I)),
+    ("contacts", re.compile(r"контакт|связь|телефон|почт|email|адрес|офис|написать", re.I)),
+    ("legal", re.compile(r"реквизит|о[- ]компани|about|компани|documents|документ", re.I)),
+    ("delivery", re.compile(r"достав|оплата|условия|dostavka|shipping|самовывоз", re.I)),
+]
+_NAV_NOISE = re.compile(r"войти|регистр|корзин|личн|политик|cookie|ваканс", re.I)
+
+
+def extract_site_links(html: str, base_url: str, limit: int = 40) -> list[tuple[str, str]]:
+    """Все внутренние ссылки с текстами якорей: [(abs_url, anchor), ...]."""
+    base_host = _up(base_url).netloc.removeprefix("www.")
+    out, seen = [], set()
+    for m in re.finditer(r'<a[^>]+href="([^"#]+)"[^>]*>(.*?)</a>',
+                         html, re.I | re.S):
+        href, anchor_html = m.group(1), m.group(2)
+        if href.startswith(("mailto:", "tel:", "javascript:", "data:")):
+            continue
+        absu = _uj(base_url, href)
+        host = _up(absu).netloc.removeprefix("www.")
+        if host != base_host:
+            continue
+        if absu.rstrip("/") == base_url.rstrip("/") or absu in seen:
+            continue
+        anchor = re.sub(r"<[^>]+>", " ", anchor_html)
+        anchor = re.sub(r"\s+", " ", anchor).strip()
+        if not anchor or len(anchor) > 120 or _NAV_NOISE.search(anchor):
+            continue
+        seen.add(absu)
+        out.append((absu, anchor))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def classify_links_regex(links: list[tuple[str, str]]) -> dict[str, list[str]]:
+    """Дешёвый слой: категории по словам якоря/URL. Ничего не стоит."""
+    out: dict[str, list[str]] = {k: [] for k, _ in _LINK_RULES}
+    for absu, anchor in links:
+        blob = f"{anchor} {absu}"
+        for cat, rx in _LINK_RULES:
+            if rx.search(blob) and absu not in out[cat]:
+                out[cat].append(absu)
+    for cat in out:
+        out[cat] = out[cat][:3]
+    return out
+
+
+async def llm_classify_links(base_url: str,
+                             links: list[tuple[str, str]]) -> dict[str, list[str]]:
+    """LLM-слой для ссылок, которые словарь не понял: «Продукция_1» тоже
+    прайс-страница, «Как нас найти» — контакты, «Юр. информация» — реквизиты."""
+    out: dict[str, list[str]] = {k: [] for k, _ in _LINK_RULES}
+    if not links:
+        return out
+    lines = "\n".join(f"{i+1}. \"{anchor}\" — {absu}"
+                      for i, (absu, anchor) in enumerate(links[:40]))
+    prompt = f"""Ниже список ссылок с главной страницы сайта поставщика "{base_url}".
+Определи, какие ссылки ведут на страницы:
+- prices: прайсы, каталоги, витрины товаров с ценами (ИМЕННО страницы с перечнем товаров/цен)
+- contacts: контакты, телефоны, адрес офиса
+- legal: реквизиты компании, «О компании», юридическая информация
+- delivery: условия доставки и оплаты
+
+{lines}
+
+Ответ — только JSON: {{"prices": [номера], "contacts": [номера], "legal": [номера], "delivery": [номера]}}.
+Не придумывай номера: пустой список, если ничего подходящего."""
+    data = await ask_json(prompt, system="Ты аккуратный классификатор ссылок B2B-сайтов.")
+    if not isinstance(data, dict):
+        return out
+    for cat in out:
+        for n in data.get(cat) or []:
+            try:
+                idx = int(n) - 1
+                if 0 <= idx < len(links) and links[idx][0] not in out[cat]:
+                    out[cat].append(links[idx][0])
+            except (ValueError, TypeError):
+                continue
+        out[cat] = out[cat][:3]
+    return out
+
+
+async def classify_site_links(html: str, base_url: str) -> dict[str, list[str]]:
+    """Словарь -> LLM на дефицит: сначала бесплатно, недостающие категории
+    добираем вычиткой якорей (цены у оптовика бывают и «Витрина», и «Продукция»)."""
+    links = extract_site_links(html, base_url)
+    cats = classify_links_regex(links)
+    deficit = [c for c in ("prices", "contacts", "legal", "delivery") if not cats[c]]
+    if deficit and links:
+        llm_cats = await llm_classify_links(base_url, links)
+        for c in deficit:
+            cats[c] = llm_cats.get(c, [])[:3]
+    return cats
 
 
 def extract_product_links(html: str, query: str, base_url: str, limit: int = 2) -> list[str]:
@@ -435,24 +539,50 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     facts.ogrn = legal.get("ogrn")
     facts.legal_name = legal.get("legal_name")
 
-    # --- нет email -> типовые страницы контактов (параллельно) ---
-    if not facts.emails:
-        import asyncio as _aio
+    # --- классификация ссылок: словарь -> LLM на дефицит ---
+    #     заменяет хардкод-пробы «/kontakty» и догадки о прайсах:
+    #     «Как нас найти» — контакты, «Витрина» — цены, «Юр. информация» — реквизиты
+    import asyncio as _aio
+    try:
+        link_cats = await classify_site_links(html, url)
+    except Exception:
+        link_cats = {k: [] for k in ("prices", "contacts", "legal", "delivery")}
 
-        async def _cpage(suffix: str) -> SiteFacts:
-            c_url = url.rstrip("/") + "/" + suffix
+    # --- дефицит email -> адресные контакт-страницы (по классификации; ---
+    #     фолбэк — старые типовые суффиксы, если сайт молчит про контакты)
+    if not facts.emails:
+        contact_pages = link_cats["contacts"][:2]
+        probe_urls = contact_pages or [url.rstrip("/") + "/" + sfx for sfx in
+                                        ("kontakty", "contacts", "dostavka")]
+
+        async def _cpage(c_url: str, is_probe: bool) -> SiteFacts:
             contact_html = await fetch_html(c_url)
             cpage_text = _text_of(contact_html) if contact_html else ""
             # рендер — только для первичной пробы /kontakty: у антиспам-сайтов
             # каждая страница — 5-10с рендера, шесть проб = минута на сайт
-            if len(cpage_text) < 200 and suffix == "kontakty":
+            if len(cpage_text) < 200 and is_probe and "kontakty" in c_url:
                 contact_html = await render_html(c_url) or contact_html
                 cpage_text = _text_of(contact_html)
-            return regex_facts(c_url, cpage_text)
+            cf = regex_facts(c_url, cpage_text)
+            # контакт-страница идёт и гемме — regex не вытаскивает из
+            # контакт-окон/скрытых блоков (кейс АВИСТРОН)
+            if use_llm and (cf.emails or cf.phones or len(cpage_text) > 400):
+                lcf = await llm_contacts(c_url, contact_text(cpage_text))
+                if lcf and lcf.ok:
+                    for ph in lcf.phones:
+                        cleaned = _clean_phone(ph)
+                        if cleaned and cleaned not in cf.phones:
+                            cf.phones.append(cleaned)
+                    for e in lcf.emails:
+                        if e not in cf.emails:
+                            cf.emails.append(e)
+                    if lcf.city and not cf.city:
+                        cf.city = lcf.city
+                    cf.ok = True
+            return cf
 
-        cf_list = await _aio.gather(*(_cpage(sfx) for sfx in
-                                       ("kontakty", "contacts", "kontakty.html",
-                                        "dostavka", "oplata", "oplata-i-dostavka")))
+        cf_list = await _aio.gather(*(_cpage(u, u not in contact_pages)
+                                       for u in probe_urls))
         for cf in cf_list:
             for e in cf.emails:
                 if e not in facts.emails:
@@ -464,8 +594,38 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                 facts.order_terms = cf.order_terms
             if cf.delivery and not facts.delivery:
                 facts.delivery = cf.delivery
+            if cf.city and not facts.city:
+                facts.city = cf.city
         if facts.emails or facts.phones:
             facts.ok = True
+
+    # --- дефицит ИНН -> страница реквизитов («О компании») ---
+    if not facts.inn and link_cats["legal"]:
+        try:
+            ltext = _text_of(await fetch_html(link_cats["legal"][0]) or "")
+            legal2 = extract_legal_from_text(ltext)
+            if legal2.get("inn"):
+                facts.inn = legal2["inn"]
+                if not facts.ogrn and legal2.get("ogrn"):
+                    facts.ogrn = legal2["ogrn"]
+                if not facts.legal_name and legal2.get("legal_name"):
+                    facts.legal_name = legal2["legal_name"]
+        except Exception:
+            pass
+
+    # --- дефицит доставки -> адресная страница доставки/оплаты ---
+    if (not facts.delivery or not facts.order_terms) and link_cats["delivery"]:
+        try:
+            dtext = _text_of(await fetch_html(link_cats["delivery"][0]) or "")
+            df = regex_facts(url, dtext)
+            if df.delivery and not facts.delivery:
+                facts.delivery = df.delivery
+            if df.order_terms and not facts.order_terms:
+                facts.order_terms = df.order_terms
+            if df.min_order and not facts.min_order:
+                facts.min_order = df.min_order
+        except Exception:
+            pass
 
     # --- два LLM-вызова ПАРАЛЛЕЛЬНО (это половина времени обхода):
     #     1) контакты: гемма по контакт-окнам (футер включён, regex не тянет);
@@ -507,15 +667,17 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         facts = merge_facts(facts, llm)
         # цены LLM релевантнее regex-мусора из навигации: приоритет LLM
         if llm.prices:
-            facts.prices = llm.prices
+            facts.prices = _polish_prices(llm.prices)
     # ссылки на разделы/прайсы по запросу
     facts.product_links = extract_product_links(html, query, url)
 
-    # --- дефицит цен на главной -> обход до 2 прайс-разделов:
-    #     у оптовиков цены почти никогда не на главной, а в каталоге/прайсе ---
-    if use_llm and not facts.prices and facts.product_links:
+    # --- дефицит цен на главной -> прайс-страницы: классифицированные ссылки
+    #     («Витрина», «Продукция») + релевантные запросу разделы product_links
+    price_targets = list(dict.fromkeys((link_cats["prices"] or [])[:1]
+                                       + facts.product_links[:2]))
+    if use_llm and not facts.prices and price_targets:
         fetched = []
-        for pl in facts.product_links[:2]:
+        for pl in price_targets[:2]:
             try:
                 sub_html = await fetch_html(pl)
                 if not sub_html:
@@ -540,6 +702,23 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             except Exception:
                 continue
     return facts
+
+
+
+
+def _polish_prices(raw: list[str]) -> list[str]:
+    """Косметика LLM-цен: «140 0 ₽ За» -> «140,00 ₽», пустые «0 руб» — вон."""
+    out = []
+    for s in raw or []:
+        s = re.sub(r"\s+(за|шт|кг|упак)\b.*$", "", (s or "").strip(), flags=re.I)
+        m = re.match(r"^(\d[\d\s]*)\s(\d)\s*₽$", s)
+        if m:
+            s = f"{m.group(1).strip()},{m.group(2)}0 ₽"
+        if s and not re.match(r"^0\s*(руб|₽)", s) and s not in out:
+            out.append(s)
+        if len(out) >= 4:
+            break
+    return out
 
 
 async def enrich_sites(urls: list[str], query: str, *, concurrency: int | None = None,
