@@ -31,6 +31,7 @@ def _now() -> str:
 
 def fmt_sum(rub: int | None) -> str | None:
     """1417564 -> «1,4 млн ₽»"""
+    rub = int(round(rub or 0))
     if not rub:
         return None
     if rub >= 1_000_000_000:
