@@ -266,6 +266,9 @@ async def by_name(name: str, *, min_score: int = 75, trust_first: bool = False) 
     fuzzy всегда отвергнет, а поисковый движок DaData уже сделал матчинг).
     """
     clean = re.sub(r"[«»\"']", "", name).strip()
+    # DaData suggest по имени без оргформы точнее: «ООО Югоптторг-23» с
+    # приставкой тянет тёзок (ЮГОПТТОРГ-Ростов вместо ЮГОПТТОРГ-23)
+    clean = re.sub(r"^(ООО|АО|ПАО|ЗАО|ИП|АНО|ОАО|ФГУП)\s*", "", clean).strip()
     if len(clean) < 4:
         return None
 

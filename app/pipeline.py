@@ -250,6 +250,32 @@ def _pessimize_all(cards) -> None:
     _pessimize_thin(cards)
 
 
+_TR = {"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+       "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+       "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+       "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+       "э": "e", "ю": "yu", "я": "ya"}
+
+
+def _brand_matches(brand: str, legal_name: str) -> bool:
+    """Бренд-матч валиден, если бренд сидит в транслите имени из ЕГРЮЛ
+    как сегмент/подстрока, либо почти равен сегменту (fuzzy>=85 —
+    ловит defagroup/ДЕФАГРУПП=89). Короткие сегменты (<4) игнорируются:
+    иначе '23' из «ОПТИМУМ 23» ложно сидит в 'opt23'."""
+    from rapidfuzz import fuzz
+    translit = "".join(_TR.get(ch, ch) for ch in legal_name.lower())
+    translit = re.sub(r"[^a-z0-9]", " ", translit)
+    b = brand.lower()
+    for seg in translit.split():
+        if len(seg) < 4:
+            continue
+        if b == seg or b in seg or seg in b:
+            return True
+        if len(b) >= 5 and fuzz.ratio(b, seg) >= 85:
+            return True
+    return False
+
+
 async def _resolve_legal(cards: list, emit: Emit, limit: int = 30) -> None:
     """Водопад, этап 1: идентификаторы и статус (DaData, ЕГРЮЛ).
 
@@ -281,11 +307,15 @@ async def _resolve_legal(cards: list, emit: Emit, limit: int = 30) -> None:
                     c.inn = info.inn
                     c.sources["ИНН"] = f"ЕГРЮЛ: найден по ОГРН {c.ogrn}"
             else:
-                # органика: имя = домен -> бренд-лукап (auchan.ru -> ООО «АШАН»)
+                # органика: имя = домен -> бренд-лукап (auchan.ru -> ООО «АШАН»).
+                # Валидация обязательна: короткий бренд находит тёзок
+                # (кейс opt23.ru -> чужое ООО «ОПТИМУМ 23», ликвидировано!)
                 if c.domain:
                     brand = c.domain.split(".")[0]
                     info = await companyinfo_src.by_name(brand, trust_first=True)
-                if not info:
+                    if info and not _brand_matches(brand, info.legal_name or ""):
+                        info = None  # тёзка, не наша компания
+                if not info and c.name and not c.name.startswith("http"):
                     info = await companyinfo_src.by_name(c.name)
                 if info:
                     c.inn = info.inn
@@ -548,6 +578,40 @@ async def _find_sites_for(cards: list, emit: Emit, limit: int = 60) -> None:
     await asyncio.gather(*(_find_one(c) for c in candidates[:limit]))
 
 
+
+
+async def _late_legal_resolve(cards: list, emit: Emit) -> None:
+    """Резолв юрлица ПОСЛЕ обхода сайтов: футер сайта даёт точное название
+    («ООО Югоптторг-23» для opt23.ru), по нему DaData находит правильную
+    компанию. Бренд-лукап на раннем этапе мог промазать или не найти."""
+    deficient = [c for c in cards
+                 if not (c.inn or c.ogrn) and c.legal_name]
+    if not deficient:
+        return
+    await emit({"type": "stage", "stage": "company", "status": "run",
+                "message": f"юрлицо по реквизитам с сайтов: {len(deficient)} карточек"})
+    for c in deficient[:30]:
+        try:
+            info = await companyinfo_src.by_name(c.legal_name)
+            if not info or not info.inn:
+                continue
+            c.inn = info.inn
+            if not c.ogrn and info.ogrn:
+                c.ogrn = info.ogrn
+            if not c.company_status and info.status:
+                c.company_status = info.status
+            if not c.director and info.director:
+                c.director = info.director
+            if not c.reg_date and info.reg_date:
+                c.reg_date = info.reg_date
+            c.sources["юрлицо"] = f"ЕГРЮЛ (dadata.ru): по реквизитам сайта — {info.legal_name or c.name}"
+            if info.status and info.status != "Действующая":
+                c.relevance = 0
+            await emit({"type": "supplier", "data": _row(c)})
+        except Exception as exc:
+            logger.debug("late resolve %s failed: %s", c.name, exc)
+
+
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
     """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков + реестр."""
     s = get_settings()
@@ -652,6 +716,18 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                 c.enrichment_status = "failed"
         await emit({"type": "stage", "stage": "enrich", "status": "done",
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
+
+        # --- 5.5 Поздний резолв: юрлицо из реквизитов сайтов + повторный
+        #     отсев неактивных (ранний бренд-лукап мог и промазать/промолчать)
+        await _late_legal_resolve(cards, emit)
+        before = len(cards)
+        late_inactive = [c for c in cards
+                         if c.company_status and c.company_status != "Действующая"]
+        if late_inactive:
+            db.insert_excluded(search_id, [_row(c) for c in late_inactive], "inactive")
+            cards = [c for c in cards
+                     if not (c.company_status and c.company_status != "Действующая")]
+            stats["excluded_inactive"] = stats.get("excluded_inactive", 0) + (before - len(cards))
 
         # --- 6. Гео: для городов федерального значения карточки с ИЗВЕСТНЫМ
         #     чужим городом — исключаем целиком (кейс ТрансСибЛизинг/Новосибирск
