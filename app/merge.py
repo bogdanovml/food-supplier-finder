@@ -393,6 +393,15 @@ def _apply_contact_facts(card: SupplierCard, facts) -> None:
     if not card.order_terms and getattr(facts, "order_terms", None):
         card.order_terms = facts.order_terms
         card.sources["условия заказа"] = f"сайт {facts.url}"
+    # город с сайта — надежнее каталога/SERП (кейс rosplanta.ru: склад в СПб)
+    fcity = getattr(facts, "city", None)
+    if fcity:
+        if not card.city or card.city.lower() != fcity.lower():
+            if card.city and card.city.lower() != fcity.lower():
+                card.sources["город (уточнён)"] = f"сайт {facts.url}: {fcity} (каталог/поиск давал {card.city})"
+            else:
+                card.sources["город"] = f"сайт {facts.url}"
+            card.city = fcity
     if card.emails or card.phones:
         card.sources.setdefault("контакты", f"сайт {facts.url}")
     if card.product_links and "разделы" not in card.sources:

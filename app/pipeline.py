@@ -642,17 +642,29 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         await emit({"type": "stage", "stage": "enrich", "status": "done",
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
 
-        # --- 6. Гео-несовпадение: пессимизация + заметка ---
-        from .merge import region_ok as _region_ok
+        # --- 6. Гео: для городов федерального значения карточки с ИЗВЕСТНЫМ
+        #     чужим городом — исключаем целиком (кейс ТрансСибЛизинг/Новосибирск
+        #     в поиске по Москве): нам нужен поставщик, который здесь работает.
+        #     Для областей/краёв — пессимизация, не исключение.
+        from .merge import region_ok as _region_ok, CITY_REGION_ALIASES
+        is_federal = region_name in CITY_REGION_ALIASES
         geo_mismatches = 0
+        kept_geo = []
         for c in cards:
-            if not _region_ok(c.city, region_name):
+            if c.city and not _region_ok(c.city, region_name):
+                if is_federal:
+                    continue  # исключение из результатов
                 c.relevance = max(0, c.relevance - 15)
                 c.sources["гео"] = f"{c.city} — вне региона запроса ({region_name})"
                 geo_mismatches += 1
-        if geo_mismatches:
+            kept_geo.append(c)
+        excluded_geo = len(cards) - len(kept_geo)
+        if excluded_geo:
+            stats["excluded_geo"] = excluded_geo
+        cards = kept_geo
+        if geo_mismatches or excluded_geo:
             await emit({"type": "stage", "stage": "company", "status": "run",
-                        "message": f"гео-несовпадений: {geo_mismatches} (пессимизированы)"})
+                        "message": f"гео-фильтр: исключено {excluded_geo}, пессимизировано {geo_mismatches}"})
 
         # --- 7. Яндекс Карты (самый тяжёлый и низкоурожайный): рейтинг ---
         await _maps_pass(cards, emit, region_name)

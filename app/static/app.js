@@ -392,9 +392,8 @@ function buildTable() {
         sorter: "string",
         formatter: (cell) => {
           const d = cell.getData();
-          const val = d.city || d.region || "";
-          if (!val) return '<span class="text-muted">—</span>';
-          return /^[А-ЯЁA-Z]/.test(val) ? escapeHtml(val) : escapeHtml(d.region || "—");
+          if (!d.city) return '<span class="text-muted small">—</span>';
+          return /^[А-ЯЁA-Z]/.test(d.city) ? escapeHtml(d.city) : '<span class="text-muted small">—</span>';
         }
       },
       {
@@ -623,7 +622,7 @@ async function openDossier(row) {
       </div>` : ""}
       <div class="dossier-row">
         <span class="dossier-row-label">Регион / Город</span>
-        <span class="dossier-row-value">${escapeHtml(supplier.city || supplier.region || "Не указан")}</span>
+        <span class="dossier-row-value">${supplier.city ? escapeHtml(supplier.city) : `не определён <span class="text-muted small">(регион поиска: ${escapeHtml(supplier.region || "—")})</span>`}</span>
       </div>
       ${supplier.site ? `
       <div class="dossier-row">

@@ -101,6 +101,7 @@ class SiteFacts:
     match: str = ""                                     # LLM: profile|adjacent|offtopic
     irrelevant: bool = False                            # вычисляется: match == offtopic
     method: str = "regex"                               # regex | llm | failed
+    city: str | None = None                              # город компании с сайта
     product_links: list[str] = field(default_factory=list)  # разделы/прайсы по запросу
     order_terms: str | None = None                        # условия заказа и доставки
     kind: str | None = None                              # производитель/дистрибьютор/магазин
@@ -302,6 +303,7 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
   "description": "1-2 предложения, чем занимается компания",
   "price_examples": ["цены ТОЛЬКО на искомый товар, в формате как на сайте: '43 руб/шт', 'от 850 руб за кг'"],
   "min_order": "мин. заказ/партия если указан, иначе null",
+  "city": "ГОРОД компании по контактным данным/реквизитам/адресу склада на странице (не город покупателя!); если не указан — null",
   "delivery": "условия доставки если указаны, иначе null",
   "order_terms": "условия заказа: оплата (безнал/нал/отсрочка), самовывоз/ТК/свой транспорт, сроки поставки — если указаны; иначе null",
   "certificates": ["найденные сертификаты/ГОСТы"],
@@ -337,6 +339,7 @@ async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
         f.description = (data.get("description") or "")[:300] or None
         f.prices = [str(x)[:60] for x in (data.get("price_examples") or [])[:4]]
         f.min_order = (data.get("min_order") or None)
+        f.city = (str(data.get("city")).strip()[:40] or None) if data.get("city") else None
         f.delivery = (data.get("delivery") or None)
         f.order_terms = (str(data.get("order_terms"))[:250] or None) if data.get("order_terms") else None
         f.certificates = [str(x)[:40] for x in (data.get("certificates") or [])[:4]]
