@@ -313,7 +313,9 @@ function handleSupplierEvent(data) {
 function refreshKpis(forcedSeconds = null) {
   const list = Array.from(suppliersMap.values());
   const total = list.length;
-  const withContacts = list.filter(s => (s.emails && s.emails.length) || (s.phones && s.phones.length)).length;
+  const isFullContact = s => (s.emails && s.emails.length > 0) ||
+    ((s.phones || []).some(p => !/\.\.\./.test(p) && !/…/.test(p)));
+  const withContacts = list.filter(isFullContact).length;
   const withPrices = list.filter(s => s.price_min || (s.gov_contracts_value && s.gov_contracts_value > 0) || s.price_note).length;
   const govCount = list.filter(s => s.gov_contracts_count > 0).length;
   const optlistCount = list.filter(s => s.site && s.site.includes("optlist.ru")).length;
@@ -337,7 +339,7 @@ function refreshKpis(forcedSeconds = null) {
   document.getElementById("count-region").textContent = list.filter(cardInRegion).length;
   document.getElementById("count-gov").textContent = govCount;
   document.getElementById("count-optlist").textContent = optlistCount;
-  document.getElementById("count-contacts").textContent = list.filter(s => (s.emails && s.emails.length) || (s.phones && s.phones.length)).length;
+  document.getElementById("count-contacts").textContent = list.filter(isFullContact).length;
 }
 
 /* --------------------------------------------------------------------------
@@ -404,7 +406,12 @@ function buildTable() {
         formatter: (cell) => {
           const arr = cell.getValue() || [];
           if (!arr.length) return '<span class="text-muted small">—</span>';
-          return `<span class="text-nowrap" style="font-size:12px">${escapeHtml(arr[0])}</span>`;
+          const ph = arr[0];
+          const masked = /\.\.\./.test(ph) || /…/.test(ph);
+          // маска из каталога: позвонить нельзя, но код города виден
+          return masked
+            ? `<span class="text-muted text-nowrap" style="font-size:12px" title="Каталог скрывает полный номер — виден только код. Полный телефон есть в карточке checko или на сайте компании">${escapeHtml(ph)}</span>`
+            : `<span class="text-nowrap" style="font-size:12px">${escapeHtml(ph)}</span>`;
         }
       },
       {
@@ -514,7 +521,8 @@ function applyTableFilter(filterKey) {
   } else if (filterKey === "optlist") {
     table.setFilter((data) => data.site && data.site.includes("optlist.ru"));
   } else if (filterKey === "contacts") {
-    table.setFilter((data) => (data.emails && data.emails.length > 0) || (data.phones && data.phones.length > 0));
+    table.setFilter((data) => (data.emails && data.emails.length > 0) ||
+      ((data.phones || []).some(p => !/\.\.\./.test(p) && !/…/.test(p))));
   }
 }
 

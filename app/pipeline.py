@@ -125,9 +125,13 @@ async def _run_directory(okved_codes: list[str], region_name: str, emit: Emit) -
         hits = await directory_src.search_okved_directory(
             okved_codes, region_name=region_name, max_per_code=100)
         status = "done" if hits else "skipped"
+        msg = "" if hits else (
+            "checko ограничивает запросы (капча) — реестр юрлиц временно "
+            "недоступен, выдача компенсируется другими источниками"
+            if directory_src.CHECKO_BLOCKED else
+            f"по ОКВЭД {', '.join(okved_codes)} в регионе ничего не найдено")
         await emit({"type": "stage", "stage": "directory", "status": status,
-                    "found": len(hits),
-                    "message": "" if hits else "по кодам/региону ничего не найдено"})
+                    "found": len(hits), "message": msg})
         return hits
     except Exception as exc:
         logger.warning("directory stage failed: %s", exc)

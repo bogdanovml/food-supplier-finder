@@ -121,6 +121,9 @@ def _region_matches(address: str, region_name: str) -> bool:
     return bool(re.search(rf"г\.?\s+{region}(?:[^а-яё]|$)", low))
 
 
+CHECKO_BLOCKED = False  # капча на каталоге checko: страницу не спарсить
+
+
 async def search_okved_directory(okved_codes: list[str], *, region_name: str,
                                   max_per_code: int = 100) -> list[DirectoryHit]:
     """Каталог юрлиц по ОКВЭД-кодам, отфильтрованный по региону.
@@ -139,6 +142,11 @@ async def search_okved_directory(okved_codes: list[str], *, region_name: str,
                 wait_ms=4500,
             )
             if not html:
+                break
+            if "подтвердите" in html[:3000].lower() or "smartcaptcha" in html.lower():
+                global CHECKO_BLOCKED
+                CHECKO_BLOCKED = True
+                logger.warning("checko catalog: captcha — каталог недоступен")
                 break
             hits = parse_catalog(html, okved)
             if not hits:
