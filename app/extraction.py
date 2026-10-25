@@ -714,7 +714,7 @@ def _polish_prices(raw: list[str]) -> list[str]:
         m = re.match(r"^(\d[\d\s]*)\s(\d)\s*₽$", s)
         if m:
             s = f"{m.group(1).strip()},{m.group(2)}0 ₽"
-        if s and not re.match(r"^0\s*(руб|₽)", s) and s not in out:
+        if s and not re.match(r"^0[\s\u00a0]*(руб|₽)", s) and s not in out:
             out.append(s)
         if len(out) >= 4:
             break

@@ -42,7 +42,8 @@ DOMAIN_BLACKLIST: set[str] = {
     "optlist.ru", "tiu.ru", "pulscen.ru", "prom.ru", "all.biz", "satom.ru",
     "fl.ru", "b2b-center.ru", "prodirectory.ru", "foodbay.com", "prodal.ru",
     "suplfood.ru", "foods.ru", "mosex.name", "agrorus.com", "opt-union.ru",
-    "sakh.com", "bloha.ru", "tenderguru.ru", "sdelanogroup.ru",
+    "sakh.com", "bloha.ru", "tenderguru.ru", "sdelanogroup.ru", "supl.biz",
+    "supplier.ru", "b2b-postavshhik.ru", "predpr.ru",
     "agroserver.ru", "suppliers.ru", "postavshhikov.net", "1sept.ru",
     # досье/вакансии/финансы — не сайты поставщиков
     "hh.ru", "superjob.ru", "spark-interfax.ru", "audit-it.ru", "casebook.ru",
@@ -208,18 +209,17 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSuppl
     gos_by_inn: dict[str, SupplierCard] = {}
     for g in gov:
         examples = [c.to_dict() for c in g.contracts[:5]]
-        note_parts = [f"«{(c.subject or 'контракт')[:60]}» — {(c.price or 0):,.0f} ₽"
-                      for c in g.contracts[:2]]
         card = SupplierCard(
             name=g.name, inn=g.inn,
             region=region_name, city=_clean_city(g.address),
             description=g.address or "",
             gov_contracts_count=g.count, gov_contracts_value=g.total_value,
             gov_contract_examples=examples,
-            price_note="контракты: " + "; ".join(note_parts) if note_parts else "",
+            # цена из контрактов НЕ пишется в price_note: суммы сделок — только
+            # в чипах 44-ФЗ; иначе append-merge блокирует реальные цены с сайтов
             sources={
                 "имя, ИНН, адрес": f"реестр контрактов 44-ФЗ (Госплан API), ИНН {g.inn}",
-                "цены": f"{g.count} исполненных контрактов на {g.total_value:,.0f} ₽",
+                "госконтракты": f"{g.count} исполненных на {g.total_value:,.0f} ₽",
             },
         )
         gos_by_inn[g.inn] = card
