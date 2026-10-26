@@ -182,9 +182,6 @@ def _final_dedupe(cards: list) -> list:
         for e in b.emails:
             if e not in a.emails:
                 a.emails.append(e)
-        for pr in b.prices:
-            if pr not in a.prices:
-                a.prices.append(pr)
         for f in ("min_order", "delivery", "order_terms", "city", "legal_name",
                   "ogrn", "director", "okved", "reg_date", "company_status",
                   "staff", "revenue_note", "profit_note", "assets_note",
