@@ -686,6 +686,23 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         except Exception:
             return None
 
+    async def _root_legal():
+        # SERP ведёт на глубокую страницу (/zelen/ukrop.html), а юрлицо
+        # чаще на главной («ООО "Фрутомания" реализует...») — frutomania.ru
+        if facts.inn or facts.legal_name:
+            return None
+        try:
+            root = f"{_up(url).scheme or 'https'}://{_up(url).netloc}/"
+            if root.rstrip("/") == url.rstrip("/"):
+                return None  # мы и есть главная
+            rhtml = await fetch_html(root)
+            rtext = _text_of(rhtml) if rhtml else ""
+            if len(rtext) < 100:
+                return None
+            return extract_legal_from_text(rtext)
+        except Exception:
+            return None
+
     async def _price_pages():
         # дефицит цен на главной -> прайс-страницы: классифицированные
         # («Витрина», «Продукция») + релевантные запросу разделы
@@ -718,8 +735,9 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                 continue
         return found or None
 
-    cf_list, legal2, delivery_page, price_found = await _aio.gather(
-        _contact_pages(), _legal_page(), _delivery_page(), _price_pages())
+    cf_list, legal2, delivery_page, price_found, root_legal = await _aio.gather(
+        _contact_pages(), _legal_page(), _delivery_page(), _price_pages(),
+        _root_legal())
 
     # --- слияние фазы 2 ---
     for cf in cf_list or []:
@@ -744,6 +762,14 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             facts.ogrn = legal2["ogrn"]
         if not facts.legal_name and legal2.get("legal_name"):
             facts.legal_name = legal2["legal_name"]
+    # юрлицо с главной (глубокая SERP-страница могла его не содержать)
+    if root_legal:
+        if not facts.inn and root_legal.get("inn"):
+            facts.inn = root_legal["inn"]
+        if not facts.ogrn and root_legal.get("ogrn"):
+            facts.ogrn = root_legal["ogrn"]
+        if not facts.legal_name and root_legal.get("legal_name"):
+            facts.legal_name = root_legal["legal_name"]
 
     if delivery_page:
         df, summary = delivery_page
