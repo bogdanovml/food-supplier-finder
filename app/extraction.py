@@ -566,18 +566,69 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     facts.ogrn = legal.get("ogrn")
     facts.legal_name = legal.get("legal_name")
 
-    # --- классификация ссылок: словарь -> LLM на дефицит ---
-    #     заменяет хардкод-пробы «/kontakty» и догадки о прайсах:
-    #     «Как нас найти» — контакты, «Витрина» — цены, «Юр. информация» — реквизиты
+    # ================================================================
+    # ДВЕ ПАРАЛЛЕЛЬНЫЕ ФАЗЫ (было 6-8 последовательных сетевых шагов):
+    # Фаза 1: всё, что зависит только от главной страницы, — одновременно.
+    # Фаза 2: адресные страницы (ссылки известны только после фазы 1).
+    # ================================================================
     import asyncio as _aio
-    try:
-        link_cats = await classify_site_links(html, url)
-    except Exception:
-        link_cats = {k: [] for k in ("prices", "contacts", "legal", "delivery")}
+    main_text = _main_text(html)
+    need_contacts_llm = use_llm and not (facts.emails and facts.phones)
+    need_facts_llm = use_llm and len(main_text) > 200
 
-    # --- дефицит email -> адресные контакт-страницы (по классификации; ---
-    #     фолбэк — старые типовые суффиксы, если сайт молчит про контакты)
-    if not facts.emails:
+    async def _links():
+        try:
+            return await classify_site_links(html, url)
+        except Exception:
+            return {k: [] for k in ("prices", "contacts", "legal", "delivery")}
+
+    async def _contacts_main():
+        if not need_contacts_llm:
+            return None
+        return await llm_contacts(url, contact_text(full_text))
+
+    async def _facts_main():
+        if not need_facts_llm:
+            return None
+        return await llm_facts(url, main_text, query)
+
+    async def _delivery_main():
+        # выжимка доставки с главной: адресная страница (фаза 2) может
+        # дать лучше — тогда перекроет
+        if not use_llm or len(full_text) < 400:
+            return None
+        try:
+            return await llm_delivery(url, main_text)
+        except Exception:
+            return None
+
+    link_cats, contact_facts, llm, delivery_main = await _aio.gather(
+        _links(), _contacts_main(), _facts_main(), _delivery_main())
+
+    # --- слияние фазы 1 ---
+    if contact_facts and contact_facts.ok:
+        for ph in contact_facts.phones:
+            cleaned = _clean_phone(ph)
+            if cleaned and cleaned not in facts.phones:
+                facts.phones.append(cleaned)
+        for e in contact_facts.emails:
+            if e not in facts.emails:
+                facts.emails.append(e)
+        if contact_facts.city:
+            facts.city = contact_facts.city
+        facts.ok = True
+    if llm and llm.ok:
+        facts = merge_facts(facts, llm)
+        if llm.prices:
+            facts.prices = _polish_prices(llm.prices)
+    if delivery_main and (not facts.delivery or len(facts.delivery) < 150):
+        facts.delivery = delivery_main
+    facts.product_links = extract_product_links(html, query, url)
+
+    # --- Фаза 2: адресные страницы, все ветки параллельно ---
+    async def _contact_pages():
+        if facts.emails:
+            return []
         contact_pages = link_cats["contacts"][:2]
         probe_urls = contact_pages or [url.rstrip("/") + "/" + sfx for sfx in
                                         ("kontakty", "contacts", "dostavka")]
@@ -585,13 +636,13 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         async def _cpage(c_url: str, is_probe: bool) -> SiteFacts:
             contact_html = await fetch_html(c_url)
             cpage_text = _text_of(contact_html) if contact_html else ""
-            # рендер — только для первичной пробы /kontakty: у антиспам-сайтов
-            # каждая страница — 5-10с рендера, шесть проб = минута на сайт
+            # рендер — только для первичной пробы /kontakty (антиспам-сайты:
+            # каждый рендер 5-10с, шесть проб = минута на сайт)
             if len(cpage_text) < 200 and is_probe and "kontakty" in c_url:
                 contact_html = await render_html(c_url) or contact_html
                 cpage_text = _text_of(contact_html)
             cf = regex_facts(c_url, cpage_text)
-            # контакт-страница идёт и гемме — regex не вытаскивает из
+            # контакт-страница идёт и гемме — regex не тащит из
             # контакт-окон/скрытых блоков (кейс АВИСТРОН)
             if use_llm and (cf.emails or cf.phones or len(cpage_text) > 400):
                 lcf = await llm_contacts(c_url, contact_text(cpage_text))
@@ -608,120 +659,42 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                     cf.ok = True
             return cf
 
-        cf_list = await _aio.gather(*(_cpage(u, u not in contact_pages)
-                                       for u in probe_urls))
-        for cf in cf_list:
-            for e in cf.emails:
-                if e not in facts.emails:
-                    facts.emails.append(e)
-            for ph in cf.phones:
-                if ph not in facts.phones:
-                    facts.phones.append(ph)
-            if cf.order_terms and not facts.order_terms:
-                facts.order_terms = cf.order_terms
-            if cf.delivery and not facts.delivery:
-                facts.delivery = cf.delivery
-            if cf.city and not facts.city:
-                facts.city = cf.city
-        if facts.emails or facts.phones:
-            facts.ok = True
+        return await _aio.gather(*(_cpage(u, u not in contact_pages)
+                                    for u in probe_urls))
 
-    # --- дефицит ИНН -> страница реквизитов («О компании») ---
-    if not facts.inn and link_cats["legal"]:
+    async def _legal_page():
+        if facts.inn or not link_cats["legal"]:
+            return None
         try:
             ltext = _text_of(await fetch_html(link_cats["legal"][0]) or "")
-            legal2 = extract_legal_from_text(ltext)
-            if legal2.get("inn"):
-                facts.inn = legal2["inn"]
-                if not facts.ogrn and legal2.get("ogrn"):
-                    facts.ogrn = legal2["ogrn"]
-                if not facts.legal_name and legal2.get("legal_name"):
-                    facts.legal_name = legal2["legal_name"]
+            return extract_legal_from_text(ltext)
         except Exception:
-            pass
+            return None
 
-    # --- дефицит доставки -> адресная страница доставки/оплаты + LLM-выжимка ---
-    if use_llm and (not facts.delivery or not facts.order_terms) and link_cats["delivery"]:
+    async def _delivery_page():
+        if not use_llm or not link_cats["delivery"]:
+            return None
+        if facts.delivery and len(facts.delivery) >= 150 and facts.order_terms:
+            return None
         try:
             dtext = _text_of(await fetch_html(link_cats["delivery"][0]) or "")
             df = regex_facts(url, dtext)
-            if df.delivery and not facts.delivery:
-                facts.delivery = df.delivery
-            if df.order_terms and not facts.order_terms:
-                facts.order_terms = df.order_terms
-            if df.min_order and not facts.min_order:
-                facts.min_order = df.min_order
-            # выжимка условий: regex-обрывки хуже понимания всей страницы
+            summary = None
             if dtext:
                 summary = await llm_delivery(url, dtext)
-                if summary:
-                    facts.delivery = summary
-                    facts.ok = True
+            return (df, summary)
         except Exception:
-            pass
-    # нет адресной страницы (или regex-обрывок) -> выжимка из главной:
-    # «Доставка партии любого объема...» — это хвост навигационной строки,
-    # закупщику нужна суть: география, порог бесплатности, сроки
-    if use_llm and (not facts.delivery or len(facts.delivery) < 150) \
-            and len(full_text) > 400:
-        try:
-            summary = await llm_delivery(url, _main_text(html))
-            if summary:
-                facts.delivery = summary
-        except Exception:
-            pass
-
-    # --- два LLM-вызова ПАРАЛЛЕЛЬНО (это половина времени обхода):
-    #     1) контакты: гемма по контакт-окнам (футер включён, regex не тянет);
-    #     2) цены/классификация: gemini по очищенному main content.
-    import asyncio as _aio
-    main_text = _main_text(html)
-    need_contacts_llm = use_llm and not (facts.emails and facts.phones)
-    need_facts_llm = use_llm and len(main_text) > 200
-
-    async def _contacts_call():
-        if not need_contacts_llm:
             return None
-        return await llm_contacts(url, contact_text(full_text))
 
-    async def _facts_call():
-        if not need_facts_llm:
+    async def _price_pages():
+        # дефицит цен на главной -> прайс-страницы: классифицированные
+        # («Витрина», «Продукция») + релевантные запросу разделы
+        targets = list(dict.fromkeys((link_cats["prices"] or [])[:1]
+                                      + facts.product_links[:2]))[:2]
+        if not use_llm or facts.prices or not targets:
             return None
-        return await llm_facts(url, main_text, query)
-
-    contact_facts, llm = await _aio.gather(_contacts_call(), _facts_call())
-
-    if contact_facts and contact_facts.ok:
-        for ph in contact_facts.phones:
-            cleaned = _clean_phone(ph)
-            if cleaned and cleaned not in facts.phones:
-                facts.phones.append(cleaned)
-        for e in contact_facts.emails:
-            if e not in facts.emails:
-                facts.emails.append(e)
-        if contact_facts.city:
-            facts.city = contact_facts.city
-        facts.ok = True
-    # город по коду стационарного телефона — надёжнее каталога (кейс
-    # «Русская Рыба»: каталог дал Москву, телефоны +7 (342) Пермь)
-    if not facts.city and facts.phones:
-        facts.city = _city_from_phone(facts.phones[0]) or facts.city
-
-    if llm and llm.ok:
-        facts = merge_facts(facts, llm)
-        # цены LLM релевантнее regex-мусора из навигации: приоритет LLM
-        if llm.prices:
-            facts.prices = _polish_prices(llm.prices)
-    # ссылки на разделы/прайсы по запросу
-    facts.product_links = extract_product_links(html, query, url)
-
-    # --- дефицит цен на главной -> прайс-страницы: классифицированные ссылки
-    #     («Витрина», «Продукция») + релевантные запросу разделы product_links
-    price_targets = list(dict.fromkeys((link_cats["prices"] or [])[:1]
-                                       + facts.product_links[:2]))
-    if use_llm and not facts.prices and price_targets:
-        fetched = []
-        for pl in price_targets[:2]:
+        found = []
+        for pl in targets:
             try:
                 sub_html = await fetch_html(pl)
                 if not sub_html:
@@ -730,10 +703,8 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                 if len(sub_text) < 200:
                     continue
                 sub = await llm_facts(pl, sub_text, query)
-                fetched.append(sub)
                 if sub.prices:
-                    facts.prices = sub.prices
-                    facts.method = "llm+price-page"
+                    found = sub.prices
                     break
                 for ph in sub.phones:
                     if _clean_phone(ph) and _clean_phone(ph) not in facts.phones:
@@ -745,6 +716,57 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
                     facts.city = sub.city
             except Exception:
                 continue
+        return found or None
+
+    cf_list, legal2, delivery_page, price_found = await _aio.gather(
+        _contact_pages(), _legal_page(), _delivery_page(), _price_pages())
+
+    # --- слияние фазы 2 ---
+    for cf in cf_list or []:
+        for e in cf.emails:
+            if e not in facts.emails:
+                facts.emails.append(e)
+        for ph in cf.phones:
+            if ph not in facts.phones:
+                facts.phones.append(ph)
+        if cf.order_terms and not facts.order_terms:
+            facts.order_terms = cf.order_terms
+        if cf.delivery and not facts.delivery:
+            facts.delivery = cf.delivery
+        if cf.city and not facts.city:
+            facts.city = cf.city
+    if facts.emails or facts.phones:
+        facts.ok = True
+
+    if legal2 and legal2.get("inn"):
+        facts.inn = legal2["inn"]
+        if not facts.ogrn and legal2.get("ogrn"):
+            facts.ogrn = legal2["ogrn"]
+        if not facts.legal_name and legal2.get("legal_name"):
+            facts.legal_name = legal2["legal_name"]
+
+    if delivery_page:
+        df, summary = delivery_page
+        if df:
+            if df.delivery and not facts.delivery:
+                facts.delivery = df.delivery
+            if df.order_terms and not facts.order_terms:
+                facts.order_terms = df.order_terms
+            if df.min_order and not facts.min_order:
+                facts.min_order = df.min_order
+        if summary:
+            facts.delivery = summary
+            facts.ok = True
+
+    if price_found:
+        facts.prices = price_found
+        facts.method = "llm+price-page"
+
+    # город по коду стационарного телефона — надёжнее каталога (кейс
+    # «Русская Рыба»: каталог дал Москву, телефоны +7 (342) Пермь)
+    if not facts.city and facts.phones:
+        facts.city = _city_from_phone(facts.phones[0]) or facts.city
+
     # финальная полировка: мусор «0 ₽» из regex-навигации не показываем
     facts.prices = _polish_prices(facts.prices)
     return facts

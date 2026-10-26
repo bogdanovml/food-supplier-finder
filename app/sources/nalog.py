@@ -144,10 +144,24 @@ async def enrich_companies(cards, emit=None) -> int:
                           or c.company_status == "Действующая"
                           and not c.revenue_note)]
     updated = 0
-    for c in todo:
+
+    async def _one(c):
         prof = await company_profile_by_inn(c.inn)
         if not prof:
+            return None
+        return (c, prof)
+
+    sem = asyncio.Semaphore(4)  # ФНС-вежливость: 4 параллельно, пауза внутри
+    async def _guarded(c):
+        async with sem:
+            r = await _one(c)
+            await asyncio.sleep(0.05)
+            return r
+
+    for pair in await asyncio.gather(*(_guarded(c) for c in todo)):
+        if not pair:
             continue
+        c, prof = pair
         if prof["status"] and not c.company_status:
             c.company_status = prof["status"]
         if not c.ogrn and prof["ogrn"]:
@@ -180,5 +194,4 @@ async def enrich_companies(cards, emit=None) -> int:
             await asyncio.sleep(0.3)
         if prof["status"] and prof["status"] != "Действующая":
             c.relevance = 0  # фильтр неактивных исключит и запишет причину
-        await asyncio.sleep(0.3)  # вежливость к официальному ресурсу
     return updated

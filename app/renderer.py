@@ -40,12 +40,29 @@ async def _ensure_browser():
         )
 
 
+_render_sem = None
+
+
+def _render_semaphore():
+    """chromium-щит: при обходе 10 сайтов параллельно не более 5 тяжёлых
+    рендеров одновременно (память/стабильность)."""
+    global _render_sem
+    import asyncio
+    if _render_sem is None:
+        _render_sem = asyncio.Semaphore(5)
+    return _render_sem
+
+
 async def render_page(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_000) -> tuple[str, str]:
     """Отрендерить страницу браузером. Возвращает (html, final_url).
 
     final_url нужен, когда сайт редиректит на профиль организации
     (Яндекс Карты: /?text=... -> /maps/org/<slug>/<id>/)."""
+    sem = _render_semaphore()
+    acquired = False
     try:
+        await sem.acquire()
+        acquired = True  # acquired=False если сам acquire провалился
         await _ensure_browser()
         page = await _browser.new_page(user_agent=UA, locale="ru-RU")
         try:
@@ -60,6 +77,9 @@ async def render_page(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_0
     except Exception as exc:
         logger.debug("render_page failed for %s: %s", url, exc)
         return "", url
+    finally:
+        if acquired:
+            sem.release()
 
 
 _render_failures = 0

@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # Приложение
     app_port: int = 8000
     db_path: str = str(BASE_DIR / "data" / "suppliers.db")
-    enrich_concurrency: int = 4
+    enrich_concurrency: int = 10
     enrich_max_sites: int = 12       # максимум сайтов для глубокого обхода за поиск
     serp_top: int = 20               # сколько позиций SERP берем на запрос
 

@@ -239,8 +239,66 @@ def _parse_card(html: str, url: str) -> CompanyInfo | None:
     return info
 
 
+import json as _json
+import time as _time
+
+_DADATA_TTL = 30 * 86400
+
+
+def _company_to_cache(info):
+    if info is None:
+        return {"__empty": True}
+    return info.to_dict() if info else {"__empty": True}
+
+
+def _company_from_cache(d):
+    if d.get("__empty"):
+        return None
+    return CompanyInfo(**d)
+
+
+async def _dadata_cached(key: str, factory):
+    """Кэш DaData (30 дней): юрлица меняются редко, повторные поиски
+    не должны тратить метры на одни и те же ИНН/названия."""
+    from app.db import db
+    try:
+        with db() as c:
+            row = c.execute("SELECT payload, ts FROM dadata_cache WHERE k=?",
+                            (key,)).fetchone()
+            if row and row["ts"] and _time.time() - _time.mktime(
+                    _time.strptime(row["ts"][:19], "%Y-%m-%dT%H:%M:%S")) < _DADATA_TTL:
+                return _company_from_cache(_json.loads(row["payload"]))
+    except Exception:
+        pass
+    info = await factory()
+    try:
+        with db() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS dadata_cache ("
+                      "k TEXT PRIMARY KEY, payload TEXT NOT NULL, ts TEXT NOT NULL)")
+            c.execute("INSERT OR REPLACE INTO dadata_cache VALUES (?,?,?)",
+                      (key, _json.dumps(_company_to_cache(info)),
+                       _time.strftime("%Y-%m-%dT%H:%M:%S")))
+            c.commit()
+    except Exception:
+        pass
+    return info
+
+
 async def by_inn(inn: str) -> CompanyInfo | None:
-    """Юрлицо по ИНН: DaData (структурированный ЕГРЮЛ) -> checko (фолбэк)."""
+    """Юрлицо по ИНН: DaData (структурированный ЕГРЮЛ) -> checko (фолбэк).
+    30-дневный кэш: повторные поиски бесплатны."""
+    from app.db import db as _db
+    try:
+        with _db() as _c:
+            _c.execute("CREATE TABLE IF NOT EXISTS dadata_cache ("
+                       "k TEXT PRIMARY KEY, payload TEXT NOT NULL, ts TEXT NOT NULL)")
+    except Exception:
+        pass
+    key = f"inn:{(inn or '').strip()}"
+    return await _dadata_cached(key, lambda: _by_inn_raw(inn))
+
+
+async def _by_inn_raw(inn: str) -> CompanyInfo | None:
     suggestions = await _dadata("findById/party", {"query": inn, "count": 1,
                                                  "branch_type": "MAIN"})
     if suggestions:
@@ -257,6 +315,12 @@ async def by_inn(inn: str) -> CompanyInfo | None:
 
 
 async def by_name(name: str, *, min_score: int = 75, trust_first: bool = False) -> CompanyInfo | None:
+    """Кэшируется с параметрами в ключе (30 дней)."""
+    key = f"name:{name.strip().lower()}:{min_score}:{int(trust_first)}"
+    return await _dadata_cached(key, lambda: _by_name_raw(name, min_score, trust_first))
+
+
+async def _by_name_raw(name: str, min_score: int = 75, trust_first: bool = False) -> CompanyInfo | None:
     """Юрлицо по названию: DaData suggest -> fuzzy-валидация -> checko (фолбэк).
 
     Валидация обязательна: «Ромашка» найдёт десятки тёзок по всей стране —

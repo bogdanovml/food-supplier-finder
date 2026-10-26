@@ -294,73 +294,81 @@ async def _resolve_legal(cards: list, emit: Emit, limit: int = 30) -> None:
     rest = [c for c in deficient if not c.inn and not c.domain]
     rest.sort(key=lambda c: c.relevance, reverse=True)
     top = (with_inn + with_domain + rest)[:limit]
-    for c in top:
-        try:
-            info = None
-            if c.inn:
-                # ЕГРЮЛ — источник истины: сайт может называть себя брендом
-                # или устаревшим именем. DaData всегда перекрывает.
-                info = await companyinfo_src.by_inn(c.inn)
-            elif c.ogrn:
-                info = await companyinfo_src.by_inn(c.ogrn)  # dadata ищет и по ОГРН
-                if info:
-                    c.inn = info.inn
-                    c.sources["ИНН"] = f"ЕГРЮЛ: найден по ОГРН {c.ogrn}"
-            else:
-                # органика: имя = домен -> бренд-лукап (auchan.ru -> ООО «АШАН»).
-                # Валидация обязательна: короткий бренд находит тёзок
-                # (кейс opt23.ru -> чужое ООО «ОПТИМУМ 23», ликвидировано!)
-                if c.domain:
-                    brand = c.domain.split(".")[0]
-                    info = await companyinfo_src.by_name(brand, trust_first=True)
-                    if info and not _brand_matches(brand, info.legal_name or ""):
-                        info = None  # тёзка, не наша компания
-                if not info and c.name and not c.name.startswith("http"):
-                    info = await companyinfo_src.by_name(c.name)
-                if info:
-                    c.inn = info.inn
-                    c.sources["юрлицо"] = "ЕГРЮЛ (dadata.ru): найдено по бренду сайта"
-            if info and info.inn:
-                if not c.inn:
-                    c.inn = info.inn
-                if not c.legal_name and info.legal_name:
-                    c.legal_name = info.legal_name
-                elif info.legal_name and c.legal_name \
-                        and info.legal_name.upper() != c.legal_name.upper():
-                    c.sources["бренд/название сайта"] = f"сайт: {c.legal_name}"
-                    c.legal_name = info.legal_name
-                if not c.ogrn and info.ogrn:
-                    c.ogrn = info.ogrn
-                if not c.director and info.director:
-                    c.director = info.director
-                if not c.okved and info.okved:
-                    c.okved = info.okved
-                if not c.reg_date and info.reg_date:
-                    c.reg_date = info.reg_date
-                if not c.company_status and info.status:
-                    c.company_status = info.status
-                if not c.staff and info.staff:
-                    c.staff = info.staff
-                src_host = (info.source_url or "").split("/")[2] if info.source_url else "ЕГРЮЛ"
-                c.sources["юрлицо"] = f"ЕГРЮЛ ({src_host}): {info.legal_name or c.name}"
-                if info.status and info.status != "Действующая":
-                    c.relevance = 0
-            # узнав ИНН — проверяем полный опыт 44/223-ФЗ
-            if c.inn and c.gov_contracts_count == 0:
-                stat = await gosplan_src.contracts_by_inn(c.inn, limit=5)
-                if stat["count"]:
-                    c.gov_contracts_count = stat["count"]
-                    c.gov_contracts_value = stat["value"]
-                    ex = stat.get("example") or {}
-                    if ex:
-                        c.gov_contract_examples = [ex]
-                    c.sources["опта 44-ФЗ"] = (
-                        f"поставщик {stat['count']} контрактов 44-ФЗ "
-                        f"на {stat['value']:,.0f} ₽ (поиск по ИНН)")
+
+    # DaData-проход параллельно (было: 40-60 последовательных запросов
+    # по 0.3-0.6с = полминуты-минута мёртвого времени)
+    _sem = asyncio.Semaphore(6)
+
+    async def _resolve_one(c) -> None:
+        async with _sem:
+            try:
+                info = None
+                if c.inn:
+                    # ЕГРЮЛ — источник истины: сайт может называть себя брендом
+                    # или устаревшим именем. DaData всегда перекрывает.
+                    info = await companyinfo_src.by_inn(c.inn)
+                elif c.ogrn:
+                    info = await companyinfo_src.by_inn(c.ogrn)  # dadata ищет и по ОГРН
+                    if info:
+                        c.inn = info.inn
+                        c.sources["ИНН"] = f"ЕГРЮЛ: найден по ОГРН {c.ogrn}"
+                else:
+                    # органика: имя = домен -> бренд-лукап (auchan.ru -> ООО «АШАН»).
+                    # Валидация обязательна: короткий бренд находит тёзок
+                    # (кейс opt23.ru -> чужое ООО «ОПТИМУМ 23», ликвидировано!)
+                    if c.domain:
+                        brand = c.domain.split(".")[0]
+                        info = await companyinfo_src.by_name(brand, trust_first=True)
+                        if info and not _brand_matches(brand, info.legal_name or ""):
+                            info = None  # тёзка, не наша компания
+                    if not info and c.name and not c.name.startswith("http"):
+                        info = await companyinfo_src.by_name(c.name)
+                    if info:
+                        c.inn = info.inn
+                        c.sources["юрлицо"] = "ЕГРЮЛ (dadata.ru): найдено по бренду сайта"
+                if info and info.inn:
+                    if not c.inn:
+                        c.inn = info.inn
+                    if not c.legal_name and info.legal_name:
+                        c.legal_name = info.legal_name
+                    elif info.legal_name and c.legal_name \
+                            and info.legal_name.upper() != c.legal_name.upper():
+                        c.sources["бренд/название сайта"] = f"сайт: {c.legal_name}"
+                        c.legal_name = info.legal_name
+                    if not c.ogrn and info.ogrn:
+                        c.ogrn = info.ogrn
+                    if not c.director and info.director:
+                        c.director = info.director
+                    if not c.okved and info.okved:
+                        c.okved = info.okved
+                    if not c.reg_date and info.reg_date:
+                        c.reg_date = info.reg_date
+                    if not c.company_status and info.status:
+                        c.company_status = info.status
+                    if not c.staff and info.staff:
+                        c.staff = info.staff
+                    src_host = (info.source_url or "").split("/")[2] if info.source_url else "ЕГРЮЛ"
+                    c.sources["юрлицо"] = f"ЕГРЮЛ ({src_host}): {info.legal_name or c.name}"
+                    if info.status and info.status != "Действующая":
+                        c.relevance = 0
+                # узнав ИНН — проверяем полный опыт 44/223-ФЗ
+                if c.inn and c.gov_contracts_count == 0:
+                    stat = await gosplan_src.contracts_by_inn(c.inn, limit=5)
+                    if stat["count"]:
+                        c.gov_contracts_count = stat["count"]
+                        c.gov_contracts_value = stat["value"]
+                        ex = stat.get("example") or {}
+                        if ex:
+                            c.gov_contract_examples = [ex]
+                        c.sources["опта 44-ФЗ"] = (
+                            f"поставщик {stat['count']} контрактов 44-ФЗ "
+                            f"на {stat['value']:,.0f} ₽ (поиск по ИНН)")
                     c.relevance = min(100, c.relevance + 10)
-            await emit({"type": "supplier", "data": _row(c)})
-        except Exception as exc:
-            logger.debug("resolve legal %s failed: %s", c.name, exc)
+                await emit({"type": "supplier", "data": _row(c)})
+            except Exception as exc:
+                logger.debug("resolve legal %s failed: %s", c.name, exc)
+
+    await asyncio.gather(*(_resolve_one(c) for c in top))
     await emit({"type": "stage", "stage": "company", "status": "run",
                 "message": f"ЕГРЮЛ проверен: {sum(1 for c in cards if c.company_status)} юрлиц"})
 
@@ -590,27 +598,32 @@ async def _late_legal_resolve(cards: list, emit: Emit) -> None:
         return
     await emit({"type": "stage", "stage": "company", "status": "run",
                 "message": f"юрлицо по реквизитам с сайтов: {len(deficient)} карточек"})
-    for c in deficient[:30]:
-        try:
-            info = await companyinfo_src.by_name(c.legal_name)
-            if not info or not info.inn:
-                continue
-            c.inn = info.inn
-            if not c.ogrn and info.ogrn:
-                c.ogrn = info.ogrn
-            if not c.company_status and info.status:
-                c.company_status = info.status
-            if not c.director and info.director:
-                c.director = info.director
-            if not c.reg_date and info.reg_date:
-                c.reg_date = info.reg_date
-            c.sources["юрлицо"] = f"ЕГРЮЛ (dadata.ru): по реквизитам сайта — {info.legal_name or c.name}"
-            if info.status and info.status != "Действующая":
-                c.relevance = 0
-            await emit({"type": "supplier", "data": _row(c)})
-        except Exception as exc:
-            logger.debug("late resolve %s failed: %s", c.name, exc)
+    _sem = asyncio.Semaphore(4)
 
+    async def _late_one(c) -> None:
+        async with _sem:
+            try:
+                info = await companyinfo_src.by_name(c.legal_name)
+                if not info or not info.inn:
+                    return
+                c.inn = info.inn
+                if not c.ogrn and info.ogrn:
+                    c.ogrn = info.ogrn
+                if not c.company_status and info.status:
+                    c.company_status = info.status
+                if not c.director and info.director:
+                    c.director = info.director
+                if not c.reg_date and info.reg_date:
+                    c.reg_date = info.reg_date
+                c.sources["юрлицо"] = (
+                    f"ЕГРЮЛ (dadata.ru): по реквизитам сайта — {info.legal_name or c.name}")
+                if info.status and info.status != "Действующая":
+                    c.relevance = 0
+                await emit({"type": "supplier", "data": _row(c)})
+            except Exception as exc:
+                logger.debug("late resolve %s failed: %s", c.name, exc)
+
+    await asyncio.gather(*(_late_one(c) for c in deficient[:30]))
 
 
 
@@ -627,35 +640,41 @@ async def _legal_facts_pass(cards: list, emit: Emit) -> int:
     from app.sources import nalog as nalog_src
     await emit({"type": "stage", "stage": "company", "status": "run",
                 "message": f"дочитать досье по ИНН: {len(todo)} карточек"})
-    done = 0
-    for c in todo[:40]:
-        try:
-            if not c.company_status or not c.legal_name or not c.director:
-                info = await companyinfo_src.by_inn(c.inn)
-                if info:
-                    if not c.legal_name and info.legal_name:
-                        c.legal_name = info.legal_name
-                    if not c.ogrn and info.ogrn:
-                        c.ogrn = info.ogrn
-                    if not c.company_status and info.status:
-                        c.company_status = info.status
-                    if not c.director and info.director:
-                        c.director = info.director
-                    if not c.reg_date and info.reg_date:
-                        c.reg_date = info.reg_date
-                    if not c.okved and info.okved:
-                        c.okved = info.okved
-                    if "юрлицо" not in c.sources:
-                        c.sources["юрлицо"] = (
-                            f"ЕГРЮЛ (dadata.ru): по ИНН с сайта — {info.legal_name or c.inn}")
-                    if info.status and info.status != "Действующая":
-                        c.relevance = 0
-                    done += 1
-            await nalog_src.enrich_companies([c], emit)
-            await emit({"type": "supplier", "data": _row(c)})
-        except Exception as exc:
-            logger.debug("facts pass %s failed: %s", c.name, exc)
-    return done
+    _sem = asyncio.Semaphore(4)
+
+    async def _facts_one(c) -> int:
+        done = 0
+        async with _sem:
+            try:
+                if not c.company_status or not c.legal_name or not c.director:
+                    info = await companyinfo_src.by_inn(c.inn)
+                    if info:
+                        if not c.legal_name and info.legal_name:
+                            c.legal_name = info.legal_name
+                        if not c.ogrn and info.ogrn:
+                            c.ogrn = info.ogrn
+                        if not c.company_status and info.status:
+                            c.company_status = info.status
+                        if not c.director and info.director:
+                            c.director = info.director
+                        if not c.reg_date and info.reg_date:
+                            c.reg_date = info.reg_date
+                        if not c.okved and info.okved:
+                            c.okved = info.okved
+                        if "юрлицо" not in c.sources:
+                            c.sources["юрлицо"] = (
+                                f"ЕГРЮЛ (dadata.ru): по ИНН с сайта — {info.legal_name or c.inn}")
+                        if info.status and info.status != "Действующая":
+                            c.relevance = 0
+                        done += 1
+                await nalog_src.enrich_companies([c], emit)
+                await emit({"type": "supplier", "data": _row(c)})
+            except Exception as exc:
+                logger.debug("facts pass %s failed: %s", c.name, exc)
+        return done
+
+    results = await asyncio.gather(*(_facts_one(c) for c in todo[:40]))
+    return sum(r for r in results if r)
 
 
 
