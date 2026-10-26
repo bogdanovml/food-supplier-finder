@@ -954,19 +954,31 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         #     («доставляем в Пермский край») — тогда карточка легальна.
         from .merge import (region_ok as _region_ok, CITY_REGION_ALIASES,
                             REGION_KEYWORDS)
+        import re as _re
+        # федеральная доставка покрывает любой регион запроса:
+        # «присутствует ИЛИ доставляет» — критерий попадания в выдачу
+        _FEDERAL_DELIVERY = _re.compile(
+            r"по всей россии|по россии|в любой (город|регион)|любой регион"
+            r"|\bрф\b|транспортн\w+ компани|любые тк|\bтк\b|по снг|россии и снг"
+            r"|территори\w+ россии|все регионы", _re.I)
+
         def _delivers_here(c) -> bool:
-            blob = f"{c.delivery or ''} {c.order_terms or ''} {c.description or ''}".lower()
+            blob = f"{c.delivery or ''} {c.order_terms or ''} {c.description or ''}"
+            if _FEDERAL_DELIVERY.search(blob):
+                return True
+            low = blob.lower()
             kws = set()
             for grp in (CITY_REGION_ALIASES.get(region_name),
                         REGION_KEYWORDS.get(region_name)):
                 kws |= set(grp or [])
-            return any(k in blob for k in kws if k)
+            return any(k in low for k in kws if k)
 
         kept_geo = []
         for c in cards:
             if c.city and not _region_ok(c.city, region_name):
                 if _delivers_here(c):
-                    c.sources["гео"] = (f"{c.city}, но доставка в регион "
+                    c.relevance = max(0, c.relevance - 5)  # ниже местных
+                    c.sources["гео"] = (f"{c.city} — доставка в регион "
                                        f"«{region_name}» заявлена на сайте")
                 else:
                     continue  # чужой город без доставки к нам — вон из выдачи
