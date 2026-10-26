@@ -47,6 +47,7 @@ let suppliersMap = new Map(); // key -> supplier object
 let searchTimerInterval = null;
 let searchStartTime = 0;
 let activeFilter = "all";
+let currentRegion = ""; // для дефолтного гео-фильтра выдачи
 // ручная селекция: клик по строке = досье, выделение — только чекбоксом
 const selectedIds = new Set();
 
@@ -363,13 +364,6 @@ function refreshKpis(forcedSeconds = null) {
   } else {
     document.getElementById("kpi-time").textContent = "—";
   }
-
-  // Filter pill badges
-  document.getElementById("count-all").textContent = total;
-  document.getElementById("count-region").textContent = list.filter(cardInRegion).length;
-  document.getElementById("count-gov").textContent = govCount;
-  document.getElementById("count-optlist").textContent = optlistCount;
-  document.getElementById("count-contacts").textContent = list.filter(isFullContact).length;
 }
 
 /* --------------------------------------------------------------------------
@@ -536,6 +530,9 @@ function buildTable() {
   });
 
   table.on("rowClick", (e, row) => {
+    // клик по чекбоксу выделения — не досье (Tabulator дергает оба колбэка
+    // из одного делегированного листенера, stopPropagation не помогает)
+    if (e.target.closest && e.target.closest(".row-sel")) return;
     openDossier(row.getData());
   });
 }
