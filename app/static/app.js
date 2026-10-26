@@ -47,6 +47,31 @@ let suppliersMap = new Map(); // key -> supplier object
 let searchTimerInterval = null;
 let searchStartTime = 0;
 let activeFilter = "all";
+// ручная селекция: клик по строке = досье, выделение — только чекбоксом
+const selectedIds = new Set();
+
+function getSelectedSuppliers() {
+  const all = table ? table.getData() : [];
+  return all.filter(d => selectedIds.has(d.id));
+}
+
+function toggleSelectAll() {
+  if (!table) return;
+  const rows = table.getRows("active"); // только отфильтрованные/видимые
+  const ids = rows.map(r => r.getData().id);
+  const allSelected = ids.length && ids.every(id => selectedIds.has(id));
+  if (allSelected) {
+    ids.forEach(id => selectedIds.delete(id));
+  } else {
+    ids.forEach(id => selectedIds.add(id));
+  }
+  document.querySelectorAll(".row-sel").forEach(cb => {
+    const row = cb.closest(".tabulator-row");
+    // перерисуем чекбоксы по актуальному состоянию
+  });
+  table.redraw();
+  updateSelectionState();
+}
 
 /* --------------------------------------------------------------------------
    Initialization
@@ -108,6 +133,8 @@ function setupEventListeners() {
   document.getElementById("btn-registry").addEventListener("click", openRegistry);
   document.getElementById("tab-results").addEventListener("click", () => switchView("results"));
   document.getElementById("tab-excluded").addEventListener("click", () => switchView("excluded"));
+  document.getElementById("tab-other-regions").addEventListener("click", () => switchView("other-regions"));
+  document.getElementById("btn-select-all").addEventListener("click", toggleSelectAll);
 
   // Filter pills
   document.querySelectorAll("#filter-pills button").forEach(btn => {
@@ -130,10 +157,10 @@ async function onStartSearch(e) {
 
   currentSearchQuery = query;
   currentSearchRegion = region;
+  currentRegion = region;
+  selectedIds.clear();
   suppliersMap.clear();
 
-  // гео-фильтр «В регионе» включен по умолчанию для городов федерального значения
-  setDefaultFilter(isFederalCityRegion(region) ? "region" : "all");
   currentView = "excluded"; switchView("results"); // сброс вкладки на «Результаты»
 
   // UI state transition
@@ -358,19 +385,28 @@ function buildTable() {
     height: "580px",
     pagination: "local",
     paginationSize: 25,
-    selectableRows: true,
+    selectableRows: false,
     placeholder: "Нет данных для отображения. Запустите поиск по категории.",
     rowSelectionChanged: (data, rows) => {
       updateSelectionState();
     },
     columns: [
       {
-        formatter: "rowSelection",
-        titleFormatter: "rowSelection",
+        title: "",
+        field: "__sel",
         hozAlign: "center",
         headerHozAlign: "center",
         width: 36,
-        headerSort: false
+        headerSort: false,
+        formatter: (cell) => `<input type="checkbox" class="row-sel" ${selectedIds.has(cell.getData().id) ? "checked" : ""}>`,
+        cellClick: (e, cell) => {
+          e.stopPropagation();
+          const id = cell.getData().id;
+          if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id);
+          const cb = cell.getElement().querySelector(".row-sel");
+          if (cb) cb.checked = selectedIds.has(id);
+          updateSelectionState();
+        }
       },
       {
         title: "Поставщик",
@@ -429,27 +465,40 @@ function buildTable() {
         }
       },
       {
-        title: "Цена по запросу",
+        title: "Цены",
         field: "price_note",
-        widthGrow: 1.6,
+        widthGrow: 1.5,
+        minWidth: 130,
+        headerSort: false,
+        formatter: (cell) => {
+          const d = cell.getData();
+          let note = d.price_note || "";
+          if (note.startsWith("контракты:")) note = "";
+          const priceLine = note
+            ? `<div class="text-truncate" style="font-size:12px" title="Цены с сайта поставщика по предмету запроса: ${escapeHtml(note)}">${escapeHtml(note.slice(0, 60))}</div>`
+            : "";
+          const pl = (d.product_links || [])[0];
+          if (pl) {
+            return `<a href="${escapeHtml(pl)}" target="_blank" rel="noopener" class="small text-decoration-none" title="Страница прайса/каталога поставщика">Прайс-лист ↗</a>${priceLine}`;
+          }
+          if (note) return priceLine;
+          return '<span class="text-muted small">По запросу</span>';
+        }
+      },
+      {
+        title: "Условия поставки",
+        field: "min_order",
+        widthGrow: 1.3,
         minWidth: 140,
         headerSort: false,
         formatter: (cell) => {
           const d = cell.getData();
-          // цена ПО ПРОДУКТУ: суммы контрактов — не цена за товар, они в чипе «44-ФЗ»
-          let note = d.price_note || "";
-          if (note.startsWith("контракты:")) note = "";
-          if (!note && d.price_min) note = `от ${d.price_min} ₽${d.price_max ? ` до ${d.price_max} ₽` : ""}`;
-          if (!note) return '<span class="text-muted small">По запросу КП</span>';
-          return `<div class="text-truncate" style="font-size:12px" title="Цены с сайта поставщика по предмету запроса: ${escapeHtml(note)}">${escapeHtml(note.slice(0, 80))}</div>`;
+          const bits = [];
+          if (d.min_order) bits.push(`<span class="badge bg-light text-dark border" style="font-size:11px">${escapeHtml(d.min_order)}</span>`);
+          if (d.delivery) bits.push(`<div class="text-truncate" style="font-size:11px" title="${escapeHtml(d.delivery)}">${escapeHtml(d.delivery.slice(0, 80))}</div>`);
+          if (!bits.length) return '<span class="text-muted small">—</span>';
+          return bits.join("");
         }
-      },
-      {
-        title: "Мин. заказ",
-        field: "min_order",
-        width: 90,
-        headerSort: false,
-        formatter: (c) => c.getValue() ? `<span class="badge bg-light text-dark border" style="font-size:11px">${escapeHtml(c.getValue())}</span>` : '<span class="text-muted small">—</span>'
       },
       {
         title: "Надёжность",
@@ -482,17 +531,6 @@ function buildTable() {
           return `<div class="d-flex flex-wrap gap-1">${bits.join("")}</div>`;
         }
       },
-      {
-        title: "",
-        width: 65,
-        hozAlign: "center",
-        headerSort: false,
-        formatter: () => `<button class="btn btn-sm btn-outline-secondary" style="font-size:11px;padding:2px 8px">Досье</button>`,
-        cellClick: (e, cell) => {
-          e.stopPropagation();
-          openDossier(cell.getData());
-        }
-      }
     ],
     initialSort: [{ column: "relevance", dir: "desc" }]
   });
@@ -534,7 +572,7 @@ function applyTableFilter(filterKey) {
 }
 
 function updateSelectionState() {
-  const selected = table ? table.getSelectedData() : [];
+  const selected = getSelectedSuppliers();
   const count = selected.length;
   const pill = document.getElementById("selection-pill");
   const countEl = document.getElementById("selection-count");
@@ -835,7 +873,7 @@ async function updateSupplierStatus(id, status) {
    Side-by-Side Comparison Matrix
    -------------------------------------------------------------------------- */
 function openComparisonModal() {
-  const selected = table.getSelectedData();
+  const selected = getSelectedSuppliers();
   if (selected.length < 2) {
     alert("Выберите минимум 2 поставщиков для сравнения (галочки слева).");
     return;
@@ -894,7 +932,7 @@ async function openRfqModal() {
     alert("Сначала дождитесь сохранения поисковой сессии.");
     return;
   }
-  let selected = table ? table.getSelectedData() : [];
+  let selected = getSelectedSuppliers();
   if (!selected.length) {
     selected = Array.from(suppliersMap.values()).filter(s => s.emails && s.emails.length).slice(0, 5);
   }
@@ -1040,7 +1078,7 @@ window.restoreSearch = async function (e, searchId) {
     // и на восстановлении тоже: старые поиски содержат карточки до
     // серверного гео-исключения, фильтр прячет их клиентски
     if (s && s.region) {
-      setDefaultFilter(isFederalCityRegion(s.region) ? "region" : "all");
+      currentRegion = s.region;
     }
     updateTableData();
     let durationSec = null;
@@ -1149,6 +1187,29 @@ async function switchView(view) {
   document.getElementById("tab-excluded").className =
     view === "excluded" ? "btn btn-success active" : "btn btn-outline-success";
 
+  if (view === "other-regions") {
+    if (!currentSearchId) return;
+    const res = await fetch(`/api/searches/${currentSearchId}/excluded`);
+    const excluded = await res.json();
+    const geoOnly = excluded.filter(e => e.reason === "geo");
+    if (!resultsColumnsBackup) {
+      resultsColumnsBackup = table.getColumns().map(c => c.getDefinition());
+    }
+    table.setColumns([
+      { title: "Поставщик", field: "name", widthGrow: 2, formatter: (cell) =>
+          `<div class="fw-semibold">${escapeHtml(cell.getValue())}</div>` },
+      { title: "Город", field: "city", width: 120, formatter: (c) =>
+          escapeHtml(c.getValue() || "—") },
+      { title: "Домен", field: "domain", widthGrow: 1.2, formatter: (c) =>
+          c.getValue() ? `<span class="font-monospace small">${escapeHtml(c.getValue())}</span>` : "—" },
+      { title: "Регион запроса", field: "reason", width: 130, formatter: () =>
+          `<span class="badge bg-warning text-dark">вне региона поиска</span>` },
+    ]);
+    table.setData(geoOnly.map((e, i) => ({ ...e, id: i })));
+    document.getElementById("btn-compare").disabled = true;
+    document.getElementById("btn-rfq").disabled = true;
+    return;
+  }
   if (view === "excluded") {
     if (!currentSearchId) return;
     const res = await fetch(`/api/searches/${currentSearchId}/excluded`);
