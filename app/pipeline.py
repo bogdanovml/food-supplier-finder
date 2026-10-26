@@ -162,6 +162,49 @@ async def _run_gosplan(query: str, region_code: int, classifiers: list[str],
         return []
 
 
+def _final_dedupe(cards: list) -> list:
+    """Схлопнуть дубли ПОСЛЕ обогащения: один ИНН = одна карточка
+    (два SERP-хита на разные страницы одного сайта дают двух «Фрутоманий»
+    с разными ценами). Данные сливаем: контакты/цены/юрлицо — из всех."""
+    from .merge import domain_key
+    by_key: dict[str, object] = {}
+    for c in cards:
+        key = c.inn or c.ogrn or ("d:" + domain_key(c.domain or c.site or c.name))
+        base = by_key.get(key)
+        if base is None:
+            by_key[key] = c
+            continue
+        # слияние: приоритет — карточке с большим релевансом, факты добором
+        a, b = (base, c) if base.relevance >= c.relevance else (c, base)
+        for ph in b.phones:
+            if ph not in a.phones:
+                a.phones.append(ph)
+        for e in b.emails:
+            if e not in a.emails:
+                a.emails.append(e)
+        for pr in b.prices:
+            if pr not in a.prices:
+                a.prices.append(pr)
+        for f in ("min_order", "delivery", "order_terms", "city", "legal_name",
+                  "ogrn", "director", "okved", "reg_date", "company_status",
+                  "staff", "revenue_note", "profit_note", "assets_note",
+                  "checko_url", "maps_url", "price_note", "description",
+                  "site", "domain"):
+            if not getattr(a, f, None) and getattr(b, f, None):
+                setattr(a, f, getattr(b, f))
+        if b.gov_contracts_count:
+            a.gov_contracts_count = max(a.gov_contracts_count, b.gov_contracts_count)
+            a.gov_contracts_value = max(a.gov_contracts_value, b.gov_contracts_value)
+        if not a.maps_rating and b.maps_rating:
+            a.maps_rating, a.maps_reviews = b.maps_rating, b.maps_reviews
+        if b.site and a.site != b.site and "optlist.ru" in (b.site or ""):
+            pass
+        for k, v in b.sources.items():
+            a.sources.setdefault(k, v)
+        by_key[key] = a
+    return list(by_key.values())
+
+
 async def _structure_reasons(cards: list, query: str, emit: Emit) -> None:
     """LLM: «почему связаться» — строго по фактам, без пересказа описаний."""
     await emit({"type": "stage", "stage": "structure", "status": "start"})
@@ -980,6 +1023,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                         "message": f"скрыто карточек без юрлица и полезных данных: {excluded_no_legal}"})
 
         _pessimize_all(cards)
+        cards = _final_dedupe(cards)
 
         # --- structure + финальные карточки ---
         await _structure_reasons(cards, query, emit)
