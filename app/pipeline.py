@@ -967,7 +967,10 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             r"|по снг\b|территори\w+ россии", _re.I)
 
         def _delivers_here(c) -> bool:
-            blob = f"{c.delivery or ''} {c.order_terms or ''} {c.description or ''}"
+            # федеральность читаем ТОЛЬКО со страниц доставки/условий сайта:
+            # SERP-сниппет («Доставка по всей России! Заходите!») — реклама,
+            # не условия (кейс agroopt-market в тульской выдаче)
+            blob = f"{c.delivery or ''} {c.order_terms or ''}"
             if _FEDERAL_DELIVERY.search(blob):
                 return True
             low = blob.lower()
