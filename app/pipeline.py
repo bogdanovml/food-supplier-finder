@@ -936,6 +936,9 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         await _late_legal_resolve(cards, emit)
         await _legal_facts_pass(cards, emit)
         await _serp_inn_fallback(cards, emit)
+        # дедуп ДО гео-фильтра: две карточки одного поставщика (SERP + каталог)
+        # могут нести разные города — сначала слить, потом решать про регион
+        cards = _final_dedupe(cards)
         before = len(cards)
         late_inactive = [c for c in cards
                          if c.company_status and c.company_status != "Действующая"]
@@ -1020,7 +1023,6 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                         "message": f"скрыто карточек без юрлица и полезных данных: {excluded_no_legal}"})
 
         _pessimize_all(cards)
-        cards = _final_dedupe(cards)
 
         # --- structure + финальные карточки ---
         await _structure_reasons(cards, query, emit)

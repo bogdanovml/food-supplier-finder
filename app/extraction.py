@@ -700,8 +700,8 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         if summary and (not facts.delivery or len(facts.delivery) < 150):
             facts.delivery = summary
         # город из текста доставки: «Доставка по Перми и краю» при поиске
-        # по Москве — это чужой город, гео-фильтр обязан его видеть
-        if dcity and not facts.city:
+        # по Москве — чужой город. Собственный сайт сильнее каталога/сниппета
+        if dcity:
             facts.city = dcity
     # --- Фаза 2: адресные страницы, все ветки параллельно ---
     async def _contact_pages():
@@ -861,7 +861,7 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         if summary:
             facts.delivery = summary
             facts.ok = True
-        if dcity and not facts.city:
+        if dcity:
             facts.city = dcity
 
     if price_found:
