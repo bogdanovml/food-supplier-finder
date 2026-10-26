@@ -218,6 +218,7 @@ class SupplierCard:
     price_note: str = ""
     min_order: str = ""
     delivery: str = ""
+    delivery_geo: str | None = None
     certificates: list[str] = field(default_factory=list)
     docs_verified: bool = False
     gov_contracts_count: int = 0
@@ -241,7 +242,7 @@ class SupplierCard:
             "assets_note": self.assets_note,
             "checko_url": self.checko_url, "maps_url": self.maps_url,
             "maps_rating": self.maps_rating, "maps_reviews": self.maps_reviews,
-            "product_links": self.product_links, "order_terms": self.order_terms,
+            "product_links": self.product_links, "order_terms": self.order_terms, "delivery_geo": self.delivery_geo,
             "city": self.city, "region": self.region, "phones": self.phones,
             "emails": self.emails, "description": self.description,
             "categories": self.categories, "price_min": self.price_min,
@@ -517,6 +518,8 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
     if facts.min_order and not card.min_order:
         card.min_order = facts.min_order
         card.sources["мин. заказ"] = f"сайт {facts.url}"
+    if facts.delivery_geo and not card.delivery_geo:
+        card.delivery_geo = facts.delivery_geo
     if facts.delivery and not card.delivery:
         card.delivery = facts.delivery
         card.sources["доставка"] = f"сайт {facts.url}"

@@ -968,6 +968,10 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             blob = f"{c.delivery or ''} {c.order_terms or ''} {c.description or ''}"
             if _FEDERAL_DELIVERY.search(blob):
                 return True
+            # структурированное поле от LLM: «вся РФ» / «РФ и СНГ»
+            dg = c.delivery_geo or ""
+            if dg and _re.search(r"рф|росси|снг|все регионы|любой регион", dg, _re.I):
+                return True
             low = blob.lower()
             kws = set()
             for grp in (CITY_REGION_ALIASES.get(region_name),

@@ -98,6 +98,7 @@ class SiteFacts:
     min_order: str | None = None
     certificates: list[str] = field(default_factory=list)
     delivery: str | None = None
+    delivery_geo: str | None = None  # география доставки: «Москва и МО», «вся РФ»
     description: str | None = None
     match: str = ""                                     # LLM: profile|adjacent|offtopic
     irrelevant: bool = False                            # вычисляется: match == offtopic
@@ -478,7 +479,7 @@ async def llm_contacts(url: str, text: str) -> SiteFacts:
 
 
 
-async def llm_delivery(url: str, text: str) -> tuple[str | None, str | None]:
+async def llm_delivery(url: str, text: str) -> tuple[str | None, str | None, str | None]:
     """Условия доставки выжимкой: география, бесплатность/порог, сроки,
     транспорт. Regex даёт обрывки вроде «доставка готовых рационов...» —
     закупщику нужна суть, а не первая строка с кейвордом."""
@@ -489,25 +490,33 @@ async def llm_delivery(url: str, text: str) -> tuple[str | None, str | None]:
 стоимость или порог бесплатной доставки, сроки, самовывоз, транспортные компании,
 условия оплаты (нал/безнал/отсрочка) если есть.
 
-Дополнительно: если доставка явно ЛОКАЛЬНАЯ (конкретный город/регион — «по Перми
-и краю», «по Москве и МО»), укажи city = этот город в именительном падеже.
-Если доставка федеральная («по России», «в любой город», «любые ТК») — city: null.
-Это НЕ город покупателя: только то, что написано в тексте.
+Раздели данные на поля:
+- geo: ГЕОГРАФИЯ доставки кратко — «Москва и МО», «Пермский край», «вся РФ»,
+  «РФ и СНГ», «Санкт-Петербург и ЛО». null если не указана.
+- delivery: УСЛОВИЯ доставки БЕЗ географии: порог бесплатности, стоимость,
+  сроки, самовывоз, транспортные компании, оплата (нал/безнал/отсрочка).
+- city: если доставка явно ЛОКАЛЬНАЯ (конкретный город/регион — «по Перми
+  и краю», «по Москве и МО») — этот город в именительном падеже.
+  Если федеральная («по России», «в любой город») — null.
+  Это НЕ город покупателя: только то, что написано в тексте.
 
-Ответ СТРОГО JSON: {{"delivery": "сводка условий или null", "city": "город локальной доставки или null"}}
+Ответ СТРОГО JSON: {{"geo": "география или null", "delivery": "условия без географии или null", "city": "город или null"}}
 
 Текст:
 {text[:7000]}"""
     try:
         data = await ask_json(prompt, smart=False, temperature=0.1, max_tokens=300)
         d = (data or {}).get("delivery")
-        if not (isinstance(d, str) and len(d.strip()) > 10):
-            return None
-        return (d.strip()[:240],
-                (str(data.get("city")).strip()[:40] or None) if data.get("city") else None)
+        if not (isinstance(d, str) and len(d.strip()) > 10) and not data.get("geo"):
+            return (None, None, None)
+        geo = ((str(data.get("geo")).strip()[:40] or None)
+               if data.get("geo") else None)
+        city = ((str(data.get("city")).strip()[:40] or None)
+                if data.get("city") else None)
+        return ((d.strip()[:240] if isinstance(d, str) else None), city, geo)
     except LLMError as exc:
         logger.debug("llm_delivery failed for %s: %s", url, exc)
-    return None
+    return (None, None, None)
 
 
 async def llm_facts(url: str, text: str, query: str) -> SiteFacts:
@@ -666,11 +675,11 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         # выжимка доставки с главной: адресная страница (фаза 2) может
         # дать лучше — тогда перекроет
         if not use_llm or len(full_text) < 400:
-            return (None, None)
+            return (None, None, None)
         try:
             return await llm_delivery(url, main_text)
         except Exception:
-            return (None, None)
+            return (None, None, None)
 
     link_cats, contact_facts, llm, delivery_main = await _aio.gather(
         _links(), _contacts_main(), _facts_main(), _delivery_main())
@@ -696,9 +705,11 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     facts.product_links = list(dict.fromkeys(
         (link_cats["prices"] or [])[:2] + extract_product_links(html, query, url)))[:3]
     if delivery_main:
-        summary, dcity = delivery_main
+        summary, dcity, dgeo = delivery_main
         if summary and (not facts.delivery or len(facts.delivery) < 150):
             facts.delivery = summary
+        if dgeo and not facts.delivery_geo:
+            facts.delivery_geo = dgeo
         # город из текста доставки: «Доставка по Перми и краю» при поиске
         # по Москве — чужой город. Собственный сайт сильнее каталога/сниппета
         if dcity:
@@ -757,12 +768,12 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         try:
             dtext = _text_of(await fetch_html(link_cats["delivery"][0]) or "")
             df = regex_facts(url, dtext)
-            summary, dcity = None, None
+            summary, dcity, dgeo = None, None, None
             if dtext:
-                summary, dcity = await llm_delivery(url, dtext)
-            return (df, summary, dcity)
+                summary, dcity, dgeo = await llm_delivery(url, dtext)
+            return (df, summary, dcity, dgeo)
         except Exception:
-            return (None, None, None)
+            return (None, None, None, None)
 
     async def _root_legal():
         # SERP ведёт на глубокую страницу (/zelen/ukrop.html), а юрлицо
@@ -850,7 +861,7 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             facts.legal_name = root_legal["legal_name"]
 
     if delivery_page:
-        df, summary, dcity = delivery_page
+        df, summary, dcity, dgeo = delivery_page
         if df:
             if df.delivery and not facts.delivery:
                 facts.delivery = df.delivery
@@ -861,6 +872,8 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         if summary:
             facts.delivery = summary
             facts.ok = True
+        if dgeo and not facts.delivery_geo:
+            facts.delivery_geo = dgeo
         if dcity:
             facts.city = dcity
 

@@ -432,15 +432,31 @@ function buildTable() {
         }
       },
       {
-        title: "Город",
-        field: "city",
-        width: 100,
+        title: "Регион доставки",
+        field: "delivery_geo",
+        width: 120,
         headerSort: true,
         sorter: "string",
         formatter: (cell) => {
           const d = cell.getData();
-          if (!d.city) return '<span class="text-muted small">—</span>';
-          return /^[А-ЯЁA-Z]/.test(d.city) ? escapeHtml(d.city) : '<span class="text-muted small">—</span>';
+          const geo = d.delivery_geo || d.city;
+          if (!geo) return '<span class="text-muted small">—</span>';
+          return `<div class="text-truncate" style="font-size:12px" title="${escapeHtml(geo)}">${escapeHtml(geo)}</div>`;
+        }
+      },
+      {
+        title: "Условия поставки",
+        field: "min_order",
+        widthGrow: 1.3,
+        minWidth: 150,
+        headerSort: false,
+        formatter: (cell) => {
+          const d = cell.getData();
+          const bits = [];
+          if (d.min_order) bits.push(`<span class="badge bg-light text-dark border" style="font-size:11px">${escapeHtml(d.min_order)}</span>`);
+          if (d.delivery) bits.push(`<div class="text-truncate" style="font-size:11px" title="${escapeHtml(d.delivery)}">${escapeHtml(d.delivery.slice(0, 90))}</div>`);
+          if (!bits.length) return '<span class="text-muted small">—</span>';
+          return bits.join("");
         }
       },
       {
@@ -484,21 +500,6 @@ function buildTable() {
             links.map((u, i) =>
               `<a href="${escapeHtml(u)}" target="_blank" rel="noopener" class="text-decoration-none text-truncate" style="max-width:220px" title="${escapeHtml(u)}">${i === 0 ? "Прайс-лист" : "Каталог"} ↗</a>`).join("") +
             `</div>`;
-        }
-      },
-      {
-        title: "Условия поставки",
-        field: "min_order",
-        widthGrow: 1.3,
-        minWidth: 140,
-        headerSort: false,
-        formatter: (cell) => {
-          const d = cell.getData();
-          const bits = [];
-          if (d.min_order) bits.push(`<span class="badge bg-light text-dark border" style="font-size:11px">${escapeHtml(d.min_order)}</span>`);
-          if (d.delivery) bits.push(`<div class="text-truncate" style="font-size:11px" title="${escapeHtml(d.delivery)}">${escapeHtml(d.delivery.slice(0, 80))}</div>`);
-          if (!bits.length) return '<span class="text-muted small">—</span>';
-          return bits.join("");
         }
       },
       {
