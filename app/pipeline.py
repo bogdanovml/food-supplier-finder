@@ -658,6 +658,52 @@ async def _legal_facts_pass(cards: list, emit: Emit) -> int:
     return done
 
 
+
+
+async def _vet_suppliers(cards: list, emit: Emit) -> list:
+    """LLM-вычитка списка карточек: «Горбуша HP» или «Панно рыба на стену» —
+    это ТОВАРЫ и хендмейд, не поставщики. Одна дешёвая LLM-вычитка батчем
+    экономит минуты обходов и не пускает мусор в таблицу закупщика."""
+    if len(cards) < 2:
+        return cards
+    from .llm import ask_json
+    lines = []
+    for i, c in enumerate(cards[:80]):
+        snippet = (c.description or "")[:70].replace("\n", " ")
+        lines.append(f"{i+1}. \"{(c.name or '?')[:60]}\" | домен: {c.domain or '—'} | {snippet}")
+    prompt = f"""Ниже список карточек из результатов поиска оптовых поставщиков продуктов питания.
+Определи для каждой: это КОМПАНИЯ-поставщик (производитель, оптовик, импортёр, дистрибьютор продуктов) или нет.
+
+"Нет" = товарные позиции из каталогов («Горбуша HP 800г», «Икра зернистая 100г»), декор/хендмейд,
+рецепты, розничные магазины без опта, физлица-объявления, информационные сайты/порталы/новости.
+
+{chr(10).join(lines)}
+
+Ответ — СТРОГО JSON: {{"suppliers": [номера строк-карточек, где именно компании-поставщики]}}.
+Не выдумывай номера. Сомневаешься — оставляй (пусть проверит дальше пайплайн)."""
+    try:
+        data = await ask_json(prompt, system="Ты строгий B2B-классификатор карточек.",
+                              smart=False, temperature=0.1, max_tokens=600)
+        keep_idx = set()
+        for n in (data or {}).get("suppliers") or []:
+            try:
+                keep_idx.add(int(n) - 1)
+            except (ValueError, TypeError):
+                continue
+        if not keep_idx:
+            return cards  # LLM не понял — не выкидываем ничего
+        dropped = [c for i, c in enumerate(cards[:80]) if i not in keep_idx]
+        kept = [c for i, c in enumerate(cards[:80]) if i in keep_idx] + cards[80:]
+        if dropped:
+            await emit({"type": "stage", "stage": "merge", "status": "run",
+                        "message": f"LLM-вычитка: убрано товаров/мусора {len(dropped)} из {len(cards)}"})
+        return kept
+    except Exception as exc:
+        logger.debug("vet suppliers failed: %s", exc)
+        return cards
+
+
+
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
     """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков + реестр."""
     s = get_settings()
@@ -685,6 +731,13 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         # --- merge ---
         await emit({"type": "stage", "stage": "merge", "status": "start"})
         cards = merge_all(serp_hits, opt_hits, gov_sup, dir_hits, region_name)
+        # LLM-вычитка списка: товары/декор/каталожные позиции — не поставщики;
+        # не должны ни стримиться в таблицу, ни тратить бюджет обходов
+        _before_vet = len(cards)
+        cards = await _vet_suppliers(cards, emit)
+        _vet_dropped = _before_vet - len(cards)
+        if _vet_dropped:
+            stats["excluded_not_supplier"] = _vet_dropped
         _pessimize_all(cards)
         await emit({"type": "stage", "stage": "merge", "status": "done", "found": len(cards)})
 
@@ -751,7 +804,10 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                    and not (c.price_min or c.min_order)]
         contactless.sort(key=lambda x: x.relevance, reverse=True)
         partial.sort(key=lambda x: x.relevance, reverse=True)
-        to_enrich = (contactless + partial)[:s.enrich_max_sites]
+        # контакты — критичный дефицит: ВСЕ бесконтактные в обход,
+        # недообогащённые — добором до общего потолка
+        cap = max(s.enrich_max_sites, len(contactless))
+        to_enrich = (contactless + partial)[:cap]
 
         async def prog(url: str, facts) -> None:
             card = by_domain.get(_domain_of(url))
@@ -815,6 +871,23 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         await _maps_pass(cards, emit, region_name)
         await emit({"type": "stage", "stage": "company", "status": "done",
                     "found": sum(1 for c in cards if c.inn)})
+
+        # --- карточки БЕЗ полных контактов не показываем: обрубок телефона
+        #     («+7916208...») и пустая почта — не способ связаться ---
+        def _has_full_contact(c) -> bool:
+            import re as _re
+            if c.emails:
+                return True
+            return any(len(_re.sub(r"\D", "", p)) >= 10 for p in (c.phones or []))
+
+        before_nc = len(cards)
+        no_contacts = [c for c in cards if not _has_full_contact(c)]
+        if no_contacts:
+            db.insert_excluded(search_id, [_row(c) for c in no_contacts], "no_contacts")
+            cards = [c for c in cards if _has_full_contact(c)]
+            stats["excluded_no_contacts"] = before_nc - len(cards)
+            await emit({"type": "stage", "stage": "company", "status": "run",
+                        "message": f"скрыто без полных контактов: {len(no_contacts)}"})
 
         # --- карточки БЕЗ юрлица (ИНН/ОГРН) не показываем: для закупщика
         #     аноним «interfoodgroup.ru» = обрубок телефона — с ним ничего
