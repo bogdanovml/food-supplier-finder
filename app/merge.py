@@ -475,5 +475,5 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
         card.price_min = min(nums)
         card.price_max = max(nums) if len(nums) > 1 else None
         # нулевые цены («0 ₽» из навигации/скриптов) закупщику не показываем
-    card.price_note = "; ".join(f"{v:g} {u}" for v, u in values[:3] if v and v > 0)
+        card.price_note = "; ".join(f"{v:g} {u}" for v, u in values[:3] if v and v > 0)
         card.sources["цена"] = f"сайт {facts.url} (по предмету запроса)"
