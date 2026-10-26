@@ -161,6 +161,7 @@ async function onStartSearch(e) {
   currentRegion = region;
   selectedIds.clear();
   suppliersMap.clear();
+  if (table) table.setPlaceholder("<div class=\"text-center py-4\"><div class=\"spinner-border spinner-border-sm text-success me-2\"></div>Идёт сбор и проверка поставщиков — таблица наполнится после завершения</div>");
 
   currentView = "excluded"; switchView("results"); // сброс вкладки на «Результаты»
 
@@ -303,13 +304,25 @@ function handlePipelineError(payload) {
   document.getElementById("pipeline-status-badge").textContent = "Сбой";
 }
 
-function handleDoneEvent(payload) {
+async function handleDoneEvent(payload) {
   currentSearchId = payload.search_id;
   document.getElementById("pipeline-status-badge").className = "badge badge-status-done";
   document.getElementById("pipeline-status-badge").textContent = "Завершено";
   setTerminalText(`Поиск завершен за ${payload.stats?.seconds || 0} с. Итого поставщиков: ${payload.count}.`);
   updateStageStatus("done", "done", null, payload.count);
-  refreshKpis();
+  // финальная выдача: только прошедшие проверки (юрлицо + контакты + гео)
+  try {
+    const res = await fetch(`/api/searches/${payload.search_id}/suppliers`);
+    if (res.ok) {
+      const finalList = await res.json();
+      suppliersMap.clear();
+      finalList.forEach(sup => suppliersMap.set(String(sup.domain || sup.inn || sup.id), sup));
+      table.setPlaceholder("Нет данных для отображения. Запустите поиск по категории.");
+      updateTableData();
+      updateSelectionState();
+    }
+  } catch (err) { console.error("final refresh failed:", err); }
+  refreshKpis(payload.stats?.seconds);
 }
 
 function setTerminalText(text) {
@@ -334,11 +347,12 @@ function stopSearchTimer() {
    Data Handling & KPIs
    -------------------------------------------------------------------------- */
 function handleSupplierEvent(data) {
+  // карточки копятся молча: во время поиска в таблице ничего не показываем —
+  // промежуточные состояния (без юрлица/контактов, чужие города, товары)
+  // потом отсеиваются, мусор пользователю смотреть незачем
   const key = String(data.domain || data.inn || data.id || data.name);
   const existing = suppliersMap.get(key) || {};
   suppliersMap.set(key, { ...existing, ...data, id: data.id || existing.id || key });
-  updateTableData();
-  refreshKpis();
 }
 
 function refreshKpis(forcedSeconds = null) {
