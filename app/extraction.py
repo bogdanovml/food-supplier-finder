@@ -478,7 +478,7 @@ async def llm_contacts(url: str, text: str) -> SiteFacts:
 
 
 
-async def llm_delivery(url: str, text: str) -> str | None:
+async def llm_delivery(url: str, text: str) -> tuple[str | None, str | None]:
     """Условия доставки выжимкой: география, бесплатность/порог, сроки,
     транспорт. Regex даёт обрывки вроде «доставка готовых рационов...» —
     закупщику нужна суть, а не первая строка с кейвордом."""
@@ -489,15 +489,22 @@ async def llm_delivery(url: str, text: str) -> str | None:
 стоимость или порог бесплатной доставки, сроки, самовывоз, транспортные компании,
 условия оплаты (нал/безнал/отсрочка) если есть.
 
-Ответ СТРОГО JSON: {{"delivery": "сводка условий или null"}}
+Дополнительно: если доставка явно ЛОКАЛЬНАЯ (конкретный город/регион — «по Перми
+и краю», «по Москве и МО»), укажи city = этот город в именительном падеже.
+Если доставка федеральная («по России», «в любой город», «любые ТК») — city: null.
+Это НЕ город покупателя: только то, что написано в тексте.
+
+Ответ СТРОГО JSON: {{"delivery": "сводка условий или null", "city": "город локальной доставки или null"}}
 
 Текст:
 {text[:7000]}"""
     try:
-        data = await ask_json(prompt, smart=False, temperature=0.1, max_tokens=250)
+        data = await ask_json(prompt, smart=False, temperature=0.1, max_tokens=300)
         d = (data or {}).get("delivery")
-        if isinstance(d, str) and len(d.strip()) > 10:
-            return d.strip()[:240]
+        if not (isinstance(d, str) and len(d.strip()) > 10):
+            return None
+        return (d.strip()[:240],
+                (str(data.get("city")).strip()[:40] or None) if data.get("city") else None)
     except LLMError as exc:
         logger.debug("llm_delivery failed for %s: %s", url, exc)
     return None
@@ -659,11 +666,11 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         # выжимка доставки с главной: адресная страница (фаза 2) может
         # дать лучше — тогда перекроет
         if not use_llm or len(full_text) < 400:
-            return None
+            return (None, None)
         try:
             return await llm_delivery(url, main_text)
         except Exception:
-            return None
+            return (None, None)
 
     link_cats, contact_facts, llm, delivery_main = await _aio.gather(
         _links(), _contacts_main(), _facts_main(), _delivery_main())
@@ -684,10 +691,18 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         facts = merge_facts(facts, llm)
         if llm.prices:
             facts.prices = _polish_prices(llm.prices)
-    if delivery_main and (not facts.delivery or len(facts.delivery) < 150):
-        facts.delivery = delivery_main
-    facts.product_links = extract_product_links(html, query, url)
-
+    # ссылки прайсов для колонки «Прайс-листы»: классифицированные страницы цен
+    # (sitemap/якоря) + релевантные запросу разделы
+    facts.product_links = list(dict.fromkeys(
+        (link_cats["prices"] or [])[:2] + extract_product_links(html, query, url)))[:3]
+    if delivery_main:
+        summary, dcity = delivery_main
+        if summary and (not facts.delivery or len(facts.delivery) < 150):
+            facts.delivery = summary
+        # город из текста доставки: «Доставка по Перми и краю» при поиске
+        # по Москве — это чужой город, гео-фильтр обязан его видеть
+        if dcity and not facts.city:
+            facts.city = dcity
     # --- Фаза 2: адресные страницы, все ветки параллельно ---
     async def _contact_pages():
         if facts.emails:
@@ -742,12 +757,12 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         try:
             dtext = _text_of(await fetch_html(link_cats["delivery"][0]) or "")
             df = regex_facts(url, dtext)
-            summary = None
+            summary, dcity = None, None
             if dtext:
-                summary = await llm_delivery(url, dtext)
-            return (df, summary)
+                summary, dcity = await llm_delivery(url, dtext)
+            return (df, summary, dcity)
         except Exception:
-            return None
+            return (None, None, None)
 
     async def _root_legal():
         # SERP ведёт на глубокую страницу (/zelen/ukrop.html), а юрлицо
@@ -835,7 +850,7 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             facts.legal_name = root_legal["legal_name"]
 
     if delivery_page:
-        df, summary = delivery_page
+        df, summary, dcity = delivery_page
         if df:
             if df.delivery and not facts.delivery:
                 facts.delivery = df.delivery
@@ -846,6 +861,8 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         if summary:
             facts.delivery = summary
             facts.ok = True
+        if dcity and not facts.city:
+            facts.city = dcity
 
     if price_found:
         facts.prices = price_found

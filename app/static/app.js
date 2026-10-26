@@ -471,24 +471,19 @@ function buildTable() {
         }
       },
       {
-        title: "Цены",
-        field: "price_note",
-        widthGrow: 1.5,
+        title: "Прайс-листы",
+        field: "product_links",
+        widthGrow: 1.4,
         minWidth: 130,
         headerSort: false,
         formatter: (cell) => {
           const d = cell.getData();
-          let note = d.price_note || "";
-          if (note.startsWith("контракты:")) note = "";
-          const priceLine = note
-            ? `<div class="text-truncate" style="font-size:12px" title="Цены с сайта поставщика по предмету запроса: ${escapeHtml(note)}">${escapeHtml(note.slice(0, 60))}</div>`
-            : "";
-          const pl = (d.product_links || [])[0];
-          if (pl) {
-            return `<a href="${escapeHtml(pl)}" target="_blank" rel="noopener" class="small text-decoration-none" title="Страница прайса/каталога поставщика">Прайс-лист ↗</a>${priceLine}`;
-          }
-          if (note) return priceLine;
-          return '<span class="text-muted small">По запросу</span>';
+          const links = (d.product_links || []).slice(0, 2);
+          if (!links.length) return '<span class="text-muted small">По запросу</span>';
+          return `<div class="d-flex flex-column" style="font-size:12px">` +
+            links.map((u, i) =>
+              `<a href="${escapeHtml(u)}" target="_blank" rel="noopener" class="text-decoration-none text-truncate" style="max-width:220px" title="${escapeHtml(u)}">${i === 0 ? "Прайс-лист" : "Каталог"} ↗</a>`).join("") +
+            `</div>`;
         }
       },
       {
@@ -528,7 +523,7 @@ function buildTable() {
             bits.push(`<span class="trust-chip ${loss ? "trust-risk" : "trust-ok"}" title="Чистая прибыль по отчётности ФНС БФО (форма 2, стр. 2400)">${loss ? "⚠ " : ""}${escapeHtml(d.profit_note)}</span>`);
           }
           if (d.maps_rating) {
-            bits.push(`<span class="trust-chip trust-map" title="Рейтинг на Яндекс Картах, ${d.maps_reviews || 0} отзывов">Карта: ${d.maps_rating.toFixed(1)}</span>`);
+            bits.push(`<span class="trust-chip trust-map" title="Рейтинг на Яндекс Картах, ${d.maps_reviews || 0} отзывов">ЯКарты: ${d.maps_rating.toFixed(1)}</span>`);
           }
           if (d.docs_verified) {
             bits.push(`<span class="trust-chip trust-doc" title="Документы проверены каталогом optlist">Документы: ок</span>`);
