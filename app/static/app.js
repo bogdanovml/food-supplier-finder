@@ -607,6 +607,35 @@ function updateSelectionState() {
    -------------------------------------------------------------------------- */
 async function openDossier(row) {
   let supplier = row;
+  if (row.__excluded) {
+    // отсеянная карточка: НЕТ fetch по id — числовые id таблиц excluded и
+    // suppliers коллизируют (id=452 отсеянного ≠ поставщик 452). Показываем
+    // ровно то, что знаем, + причину отсева
+    const reasons = {
+      no_legal: "Юрлицо не найдено (ИНН/ОГРН не определены)",
+      inactive: "Юрлицо неактивно (ликвидация/реорганизация)",
+      geo: "Другой город при поиске по федеральному городу",
+      no_contacts: "Нет полных контактов",
+      not_supplier: "Не поставщик (товар/декор/розница) — LLM-вычитка",
+    };
+    const reason = reasons[row.reason] || row.reason_label || row.reason || "отсеяно";
+    const body = `
+      <div class="dossier-row"><span class="dossier-row-label">Поставщик</span>
+        <span class="dossier-row-value fw-semibold">${escapeHtml(row.name || "—")}</span></div>
+      ${row.domain ? `<div class="dossier-row"><span class="dossier-row-label">Домен</span>
+        <span class="dossier-row-value font-monospace small">${escapeHtml(row.domain)}</span></div>` : ""}
+      ${row.city ? `<div class="dossier-row"><span class="dossier-row-label">Город</span>
+        <span class="dossier-row-value">${escapeHtml(row.city)}</span></div>` : ""}
+      ${row.inn ? `<div class="dossier-row"><span class="dossier-row-label">ИНН</span>
+        <span class="dossier-row-value font-monospace">${escapeHtml(row.inn)}</span></div>` : ""}
+      <div class="dossier-row"><span class="dossier-row-label">Причина отсева</span>
+        <span class="dossier-row-value"><span class="badge bg-danger">${escapeHtml(reason)}</span></span></div>`;
+    document.getElementById("sc-name").textContent = row.name || "Отсеянная карточка";
+    document.getElementById("sc-pretitle").textContent = "Отсеяна при проверке качества";
+    document.getElementById("sc-body").innerHTML = body;
+    bootstrap.Offcanvas.getOrCreateInstance(document.getElementById("supplier-canvas")).show();
+    return;
+  }
   if (row.id && typeof row.id === "number") {
     try {
       const res = await fetch(`/api/suppliers/${row.id}`);
@@ -1214,7 +1243,7 @@ async function switchView(view) {
       { title: "Регион запроса", field: "reason", width: 130, formatter: () =>
           `<span class="badge bg-warning text-dark">вне региона поиска</span>` },
     ]);
-    table.setData(geoOnly.map((e, i) => ({ ...e, id: i })));
+    table.setData(geoOnly.map(e => ({ ...e, __excluded: true, id: e.id })));
     document.getElementById("btn-compare").disabled = true;
     document.getElementById("btn-rfq").disabled = true;
     return;
@@ -1247,7 +1276,7 @@ async function switchView(view) {
           return `<span class="badge ${cls}">${label}</span>`;
         } },
     ]);
-    table.setData(excluded);
+    table.setData(excluded.map(e => ({ ...e, __excluded: true, id: e.id })));
     document.getElementById("btn-compare").disabled = true;
     document.getElementById("btn-rfq").disabled = true;
   } else {
