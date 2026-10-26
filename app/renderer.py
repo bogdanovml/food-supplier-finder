@@ -62,10 +62,38 @@ async def render_page(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_0
         return "", url
 
 
+_render_failures = 0
+
+
 async def render_html(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_000) -> str:
-    """Отрендерить страницу браузером. Ошибки/таймауты -> '' (не роняем пайплайн)."""
-    html, _ = await render_page(url, wait_ms=wait_ms, max_bytes=max_bytes)
-    return html
+    """Отрендерить страницу браузером. Ошибки/таймауты -> '' (не роняем пайплайн).
+
+    Жёсткий внешний кап: если браузер умер (OOM после десятков рендеров),
+    Playwright-транспорт может висеть БЕСКОНЕЧНО — wait_for лечит зависание
+    всего обхода. Три подряд провала -> перезапуск браузера."""
+    global _browser, _render_failures
+    import asyncio
+    try:
+        html, final_url = await asyncio.wait_for(
+            render_page(url, wait_ms=wait_ms, max_bytes=max_bytes),
+            timeout=45)
+        _render_failures = 0
+        return html
+    except asyncio.TimeoutError:
+        logger.warning("render_page висит >45с (%s) — браузер подозревается", url)
+        _render_failures += 1
+        if _render_failures >= 3:
+            logger.warning("3 зависания подряд: перезапуск браузера")
+            try:
+                if _browser:
+                    await _browser.close()
+            except Exception:
+                pass
+            _browser = None
+        return ""
+    except Exception as exc:
+        logger.debug("render failed %s: %s", url, exc)
+        return ""
 
 
 async def close():
