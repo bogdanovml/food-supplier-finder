@@ -612,6 +612,52 @@ async def _late_legal_resolve(cards: list, emit: Emit) -> None:
             logger.debug("late resolve %s failed: %s", c.name, exc)
 
 
+
+
+async def _legal_facts_pass(cards: list, emit: Emit) -> int:
+    """Дочитать досье юрлица для карточек, чей ИНН появился ПОЗЖЕ резолва
+    (реквизиты с сайта — кейс bik-fish.ru — или поздний резолв): к этому
+    моменту этапы «по ИНН» уже отработали вхолостую. DaData по ИНН —
+    реквизиты и статус, ФНС БФО — статус и выручка/прибыль/активы."""
+    todo = [c for c in cards
+            if c.inn and (not c.company_status or not c.legal_name
+                           or not c.revenue_note)]
+    if not todo:
+        return 0
+    from app.sources import nalog as nalog_src
+    await emit({"type": "stage", "stage": "company", "status": "run",
+                "message": f"дочитать досье по ИНН: {len(todo)} карточек"})
+    done = 0
+    for c in todo[:40]:
+        try:
+            if not c.company_status or not c.legal_name or not c.director:
+                info = await companyinfo_src.by_inn(c.inn)
+                if info:
+                    if not c.legal_name and info.legal_name:
+                        c.legal_name = info.legal_name
+                    if not c.ogrn and info.ogrn:
+                        c.ogrn = info.ogrn
+                    if not c.company_status and info.status:
+                        c.company_status = info.status
+                    if not c.director and info.director:
+                        c.director = info.director
+                    if not c.reg_date and info.reg_date:
+                        c.reg_date = info.reg_date
+                    if not c.okved and info.okved:
+                        c.okved = info.okved
+                    if "юрлицо" not in c.sources:
+                        c.sources["юрлицо"] = (
+                            f"ЕГРЮЛ (dadata.ru): по ИНН с сайта — {info.legal_name or c.inn}")
+                    if info.status and info.status != "Действующая":
+                        c.relevance = 0
+                    done += 1
+            await nalog_src.enrich_companies([c], emit)
+            await emit({"type": "supplier", "data": _row(c)})
+        except Exception as exc:
+            logger.debug("facts pass %s failed: %s", c.name, exc)
+    return done
+
+
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
     """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков + реестр."""
     s = get_settings()
@@ -728,6 +774,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         # --- 5.5 Поздний резолв: юрлицо из реквизитов сайтов + повторный
         #     отсев неактивных (ранний бренд-лукап мог и промазать/промолчать)
         await _late_legal_resolve(cards, emit)
+        await _legal_facts_pass(cards, emit)
         before = len(cards)
         late_inactive = [c for c in cards
                          if c.company_status and c.company_status != "Действующая"]
