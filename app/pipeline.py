@@ -948,32 +948,39 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                      if not (c.company_status and c.company_status != "Действующая")]
             stats["excluded_inactive"] = stats.get("excluded_inactive", 0) + (before - len(cards))
 
-        # --- 6. Гео: для городов федерального значения карточки с ИЗВЕСТНЫМ
-        #     чужим городом — исключаем целиком (кейс ТрансСибЛизинг/Новосибирск
-        #     в поиске по Москве): нам нужен поставщик, который здесь работает.
-        #     Для областей/краёв — пессимизация, не исключение.
-        from .merge import region_ok as _region_ok, CITY_REGION_ALIASES
-        is_federal = region_name in CITY_REGION_ALIASES
-        geo_mismatches = 0
+        # --- 6. Гео: карточки с ИВЕСТНЫМ чужим городом — исключаем для ВСЕХ
+        #     регионов (кейс: «укроп»/Пермский край вернул Москву, СПб, Омск).
+        #     Лазейка: собственная доставка поставщика УПОМИНАЕТ регион поиска
+        #     («доставляем в Пермский край») — тогда карточка легальна.
+        from .merge import (region_ok as _region_ok, CITY_REGION_ALIASES,
+                            REGION_KEYWORDS)
+        def _delivers_here(c) -> bool:
+            blob = f"{c.delivery or ''} {c.order_terms or ''} {c.description or ''}".lower()
+            kws = set()
+            for grp in (CITY_REGION_ALIASES.get(region_name),
+                        REGION_KEYWORDS.get(region_name)):
+                kws |= set(grp or [])
+            return any(k in blob for k in kws if k)
+
         kept_geo = []
         for c in cards:
             if c.city and not _region_ok(c.city, region_name):
-                if is_federal:
-                    continue  # исключение из результатов
-                c.relevance = max(0, c.relevance - 15)
-                c.sources["гео"] = f"{c.city} — вне региона запроса ({region_name})"
-                geo_mismatches += 1
+                if _delivers_here(c):
+                    c.sources["гео"] = (f"{c.city}, но доставка в регион "
+                                       f"«{region_name}» заявлена на сайте")
+                else:
+                    continue  # чужой город без доставки к нам — вон из выдачи
             kept_geo.append(c)
         geo_dump = [c for c in cards if c not in kept_geo]
         if geo_dump:
             db.insert_excluded(search_id, [_row(c) for c in geo_dump], "geo")
-        excluded_geo = len(cards) - len(kept_geo)
+        excluded_geo = len(geo_dump)
         if excluded_geo:
             stats["excluded_geo"] = excluded_geo
         cards = kept_geo
-        if geo_mismatches or excluded_geo:
+        if excluded_geo:
             await emit({"type": "stage", "stage": "company", "status": "run",
-                        "message": f"гео-фильтр: исключено {excluded_geo}, пессимизировано {geo_mismatches}"})
+                        "message": f"гео-фильтр: исключено чужих городов {excluded_geo}"})
 
         # --- 7. Яндекс Карты (самый тяжёлый и низкоурожайный): рейтинг ---
         await _maps_pass(cards, emit, region_name)
