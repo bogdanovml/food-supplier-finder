@@ -205,10 +205,12 @@ RE_CONTACT_KW = re.compile(
 from urllib.parse import urljoin as _uj, urlparse as _up
 
 _LINK_RULES: list[tuple[str, re.Pattern]] = [
-    ("prices", re.compile(r"прайс|цен[аык]|price|katalog|каталог|продук|товар|опт", re.I)),
-    ("contacts", re.compile(r"контакт|связь|телефон|почт|email|адрес|офис|написать", re.I)),
-    ("legal", re.compile(r"реквизит|о[- ]компани|about|компани|documents|документ", re.I)),
-    ("delivery", re.compile(r"достав|оплата|условия|dostavka|shipping|самовывоз", re.I)),
+    ("prices", re.compile(r"прайс|цен[аык]|price|prais|katalog|каталог|продук|товар|опт|products", re.I)),
+    ("contacts", re.compile(r"контакт|связь|телефон|почт|email|адрес|офис|написать|kontakty|contacts", re.I)),
+    # строго: «Компания» без «О» — слишком общий якорь, маскирует дефицит
+    # и не пускает карту сайта со страницей /requisites/ (кейс abri-kos.ru)
+    ("legal", re.compile(r"реквизит|о[- ]компани|о[- _]компан|about|rekv|requisites|документы|documents", re.I)),
+    ("delivery", re.compile(r"достав|оплата|условия|dostavka|oplata|shipping|самовывоз", re.I)),
 ]
 _NAV_NOISE = re.compile(r"войти|регистр|корзин|личн|политик|cookie|ваканс", re.I)
 
@@ -287,12 +289,73 @@ async def llm_classify_links(base_url: str,
     return out
 
 
+_SITEMAP_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
+# якорь по сегментам пути: /company/requisites/ -> «rekv» и т.п.
+_PATH_RULES: list[tuple[str, re.Pattern]] = [
+    ("legal", re.compile(r"rekv|requisites|about|company/o[-_ ]?kompani|kompaniy", re.I)),
+    ("contacts", re.compile(r"kontakty|contacts|svyaz", re.I)),
+    ("delivery", re.compile(r"dostavka|oplata|delivery|usloviya", re.I)),
+    ("prices", re.compile(r"price|prais|price-list|katalog|catalog|products|produkciya", re.I)),
+]
+
+
+async def sitemap_pages(base_url: str) -> dict[str, list[str]]:
+    """Карта сайта как источник страниц: у жирных каталогов (Bitrix) главная
+    на 500КБ и 120 якорей не хватает до «Реквизитов» в меню — а sitemap.xml
+    честно перечисляет всё. Возвращает URL по категориям."""
+    from urllib.parse import urlparse
+    out: dict[str, list[str]] = {k: [] for k, _ in _PATH_RULES}
+    try:
+        root = f"{urlparse(base_url).scheme}://{urlparse(base_url).netloc}"
+        seen_maps: set[str] = set()
+        queue = [root + "/sitemap.xml"]
+        urls: list[str] = []
+        while queue and len(seen_maps) < 4:
+            sm_url = queue.pop(0)
+            if sm_url in seen_maps:
+                continue
+            seen_maps.add(sm_url)
+            raw = await fetch_html(sm_url)
+            if not raw or "xml" not in (raw[:200] or ""):
+                continue
+            locs = _SITEMAP_RE.findall(raw)
+            for loc in locs:
+                if loc.endswith(".xml"):
+                    queue.append(loc)
+                else:
+                    urls.append(loc)
+            if len(urls) > 400:
+                break
+        if not urls:  # sitemap нет — попробуем robots.txt
+            raw = await fetch_html(root + "/robots.txt") or ""
+            for m in re.finditer(r"Sitemap:\s*(\S+)", raw, re.I):
+                smr = await fetch_html(m.group(1)) or ""
+                urls += _SITEMAP_RE.findall(smr)
+        for u in urls[:400]:
+            path = urlparse(u).path
+            for cat, rx in _PATH_RULES:
+                if rx.search(path) and u not in out[cat]:
+                    out[cat].append(u)
+        for cat in out:
+            out[cat] = out[cat][:3]
+        return out
+    except Exception:
+        return out
+
+
 async def classify_site_links(html: str, base_url: str) -> dict[str, list[str]]:
-    """Словарь -> LLM на дефицит: сначала бесплатно, недостающие категории
-    добираем вычиткой якорей (цены у оптовика бывают и «Витрина», и «Продукция»)."""
+    """Словарь -> карта сайта -> LLM на дефицит: сначала бесплатно; потом
+    sitemap.xml (жирные каталоги прячут «Реквизиты» за сотнями товарных
+    ссылок); недостающее — вычиткой якорей LLM."""
     links = extract_site_links(html, base_url)
     cats = classify_links_regex(links)
     deficit = [c for c in ("prices", "contacts", "legal", "delivery") if not cats[c]]
+    if deficit:
+        sm = await sitemap_pages(base_url)
+        for c in deficit:
+            if sm.get(c):
+                cats[c] = sm[c]
+        deficit = [c for c in deficit if not cats[c]]
     if deficit and links:
         llm_cats = await llm_classify_links(base_url, links)
         for c in deficit:

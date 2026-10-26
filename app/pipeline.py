@@ -723,6 +723,51 @@ async def _vet_suppliers(cards: list, emit: Emit) -> list:
 
 
 
+async def _serp_inn_fallback(cards: list, emit: Emit) -> int:
+    """ИНН из поисковой выдачи: «abri-kos.ru ИНН» — сниппеты ЕГРЮЛ-агрегаторов
+    дают номер прямо в ответе. Строгая валидация DaData по найденному номеру:
+    сниппет может принадлежать тёзке. Финальный фолбэк перед отсевом."""
+    from .sources import xmlstock as xmlstock_src
+    from .sources.companyinfo import by_inn as _by_inn
+    todo = [c for c in cards if c.domain and not (c.inn or c.ogrn)][:15]
+    if not todo:
+        return 0
+    await emit({"type": "stage", "stage": "company", "status": "run",
+                "message": f"ИНН из поисковой выдачи: {len(todo)} карточек"})
+    found = 0
+    for c in todo:
+        try:
+            hits = await xmlstock_src.serp_search([f"{c.domain} ИНН"], engines=["yandexlive"],
+                                                  lr=213, top=10)
+            inn = None
+            for h in hits[:8]:
+                m = re.search(r"(\d{10}|\d{12})", (h.title or "") + " " + (h.snippet or ""))
+                if m:
+                    inn = m.group(1)
+                    break
+            if not inn:
+                continue
+            info = await _by_inn(inn)
+            if info and info.inn and info.status:
+                c.inn = info.inn
+                if not c.ogrn and info.ogrn:
+                    c.ogrn = info.ogrn
+                if not c.legal_name and info.legal_name:
+                    c.legal_name = info.legal_name
+                c.company_status = info.status
+                if not c.director and info.director:
+                    c.director = info.director
+                c.sources["юрлицо"] = (f"ЕГРЮЛ: ИНН {inn} из поисковой выдачи "
+                                       f"(запрос «{c.domain} ИНН»), подтверждено DaData")
+                if info.status != "Действующая":
+                    c.relevance = 0
+                found += 1
+                await emit({"type": "supplier", "data": _row(c)})
+        except Exception as exc:
+            logger.debug("serp inn fallback %s failed: %s", c.name, exc)
+    return found
+
+
 async def run_search(query: str, region_name: str, emit: Emit) -> None:
     """Полный цикл: создаёт search в БД, гоняет этапы, пишет поставщиков + реестр."""
     s = get_settings()
@@ -850,6 +895,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         #     отсев неактивных (ранний бренд-лукап мог и промазать/промолчать)
         await _late_legal_resolve(cards, emit)
         await _legal_facts_pass(cards, emit)
+        await _serp_inn_fallback(cards, emit)
         before = len(cards)
         late_inactive = [c for c in cards
                          if c.company_status and c.company_status != "Действующая"]
@@ -908,19 +954,30 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             await emit({"type": "stage", "stage": "company", "status": "run",
                         "message": f"скрыто без полных контактов: {len(no_contacts)}"})
 
-        # --- карточки БЕЗ юрлица (ИНН/ОГРН) не показываем: для закупщика
-        #     аноним «interfoodgroup.ru» = обрубок телефона — с ним ничего
-        #     нельзя сделать (ни договор, ни проверку, ни оплату) ---
+        # --- юрлицо не найдено, НО карточка полезная (контакты/цены/условия)
+        #     — оставляем в списке с пометкой; выбрасываем только пустышки:
+        #     аноним без единого способа связаться — мусор в любом случае ---
+        def _has_useful_data(c) -> bool:
+            has_contact = bool(c.emails) or any(
+                len(re.sub(r"\D", "", p)) >= 10 for p in (c.phones or []))
+            return has_contact or bool(c.price_note or c.prices) \
+                or bool(c.delivery or c.order_terms or c.min_order)
+
         before_no_legal = len(cards)
-        no_legal = [c for c in cards if not (c.inn or c.ogrn)]
+        no_legal = [c for c in cards
+                    if not (c.inn or c.ogrn) and not _has_useful_data(c)]
+        for c in cards:
+            if not (c.inn or c.ogrn) and c not in no_legal:
+                c.sources["юрлицо"] = ("не найдено ни по сайту, ни по бренду, "
+                                       "ни в ЕГРЮЛ — проверьте реквизиты вручную")
         if no_legal:
             db.insert_excluded(search_id, [_row(c) for c in no_legal], "no_legal")
-        cards = [c for c in cards if c.inn or c.ogrn]
+            cards = [c for c in cards if c not in no_legal]
         excluded_no_legal = len(no_legal)
         if excluded_no_legal:
             stats["excluded_no_legal"] = excluded_no_legal
             await emit({"type": "stage", "stage": "company", "status": "run",
-                        "message": f"скрыто карточек без юрлица: {excluded_no_legal}"})
+                        "message": f"скрыто карточек без юрлица и полезных данных: {excluded_no_legal}"})
 
         _pessimize_all(cards)
 
