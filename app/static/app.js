@@ -161,7 +161,6 @@ async function onStartSearch(e) {
   currentRegion = region;
   selectedIds.clear();
   suppliersMap.clear();
-  if (table) table.setPlaceholder("<div class=\"text-center py-4\"><div class=\"spinner-border spinner-border-sm text-success me-2\"></div>Идёт сбор и проверка поставщиков — таблица наполнится после завершения</div>");
 
   currentView = "excluded"; switchView("results"); // сброс вкладки на «Результаты»
 
@@ -317,7 +316,6 @@ async function handleDoneEvent(payload) {
       const finalList = await res.json();
       suppliersMap.clear();
       finalList.forEach(sup => suppliersMap.set(String(sup.domain || sup.inn || sup.id), sup));
-      table.setPlaceholder("Нет данных для отображения. Запустите поиск по категории.");
       updateTableData();
       updateSelectionState();
     }
