@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -91,7 +92,26 @@ async def _get(client: httpx.AsyncClient, path: str, params: dict | None = None,
     return None
 
 
-def _index_to_raw(data, stage: str) -> list[dict]:
+STOP_WORDS: set[str] = {
+    "свежие", "свежий", "свежая", "свежее", "опт", "оптом", "купить", "в/с",
+    "замороженный", "мороженый", "мороженая", "замороженная", "цена", "поставщик",
+    "производитель", "россия", "рф", "гост", "для", "под", "или", "товара", "товар"
+}
+
+
+def get_core_stems(query: str) -> list[str]:
+    """Стемы значимых слов запроса для фильтрации контрактов Госплана.
+    Отсекает мусорные совпадения вроде «яйца куриные свежие» по слову «свежие»."""
+    words = [re.sub(r"[^а-яёa-z]", "", w.lower()) for w in (query or "").split()]
+    meaningful = [w for w in words if len(w) >= 3 and w not in STOP_WORDS]
+    stems = []
+    for w in meaningful:
+        stem = re.sub(r"(ов|ев|ам|ами|ах|ом|ем|ой|ей|ия|ии|ий|ые|ых|ый|ая|ое|ы|и|а|у|е)$", "", w)
+        stems.append(stem if len(stem) >= 3 else w)
+    return stems
+
+
+def _index_to_raw(data, stage: str, *, by_classifier: bool = False) -> list[dict]:
     out = []
     for it in data if isinstance(data, list) else []:
         try:
@@ -102,6 +122,7 @@ def _index_to_raw(data, stage: str) -> list[dict]:
                 "price": float(it.get("price") or 0) or None,
                 "subject": it.get("subject"),
                 "stage": stage,
+                "by_classifier": by_classifier,
             })
         except (TypeError, ValueError):
             continue
@@ -155,22 +176,35 @@ async def search_gov_suppliers(query: str, *, region_code: int | None,
                 if region_code:
                     params["region"] = region_code
                 data = await _get(client, "/fz44/contracts", params)
-                raws += _index_to_raw(data, "EC")
+                raws += _index_to_raw(data, "EC", by_classifier=True)
                 if len(raws) < 5:  # дополнительно исполняющиеся
                     params["stage"] = "E"
                     data = await _get(client, "/fz44/contracts", params)
-                    raws += _index_to_raw(data, "E")
+                    raws += _index_to_raw(data, "E", by_classifier=True)
 
         # --- 2. полнотекстовый поиск (уточнение) ---
-        simplified = " ".join(query.split()[:2]) or query
-        for subject_q in (f'"{query}"', simplified):
+        # Полнотекстовый поиск ОБЯЗАН фильтроваться по ключевым словам запроса:
+        # Госплан делает OR-поиск по словам («шампиньоны OR свежие»), и по слову
+        # «свежие» находит контракты на яйца (кейс «Чебаркульская птица»)!
+        core_stems = get_core_stems(query)
+        exact_q = f'"{query}"'
+        subject_queries = [exact_q]
+        if core_stems:
+            subject_queries.append(core_stems[0])
+
+        for subject_q in subject_queries:
             for stage in ("EC", "E"):
                 params = {"subject": subject_q, "stage": stage, "limit": limit,
                           "sort": "price_desc"}
                 if region_code:
                     params["region"] = region_code
                 data = await _get(client, "/fz44/contracts", params)
-                raws += _index_to_raw(data, stage)
+                new_raws = _index_to_raw(data, stage, by_classifier=False)
+                # Фильтруем полнотекстовые совпадения: в теме контракта ДОЛЖНО быть
+                # ключевое слово товара, а не случайное прилагательное «свежий»
+                if core_stems:
+                    new_raws = [r for r in new_raws if any(s in (r["subject"] or "").lower() for s in core_stems)]
+                raws += new_raws
             if len(raws) > 5:
                 break
 
