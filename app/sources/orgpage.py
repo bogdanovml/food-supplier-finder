@@ -90,6 +90,43 @@ KEYWORD_RUBRICS: list[tuple[re.Pattern, list[str]]] = [
 ]
 
 
+STOP_WORDS: set[str] = {
+    "купить", "опт", "оптом", "свежий", "свежие", "свежая", "свежее",
+    "замороженный", "мороженый", "мороженая", "замороженная",
+    "цена", "поставщик", "производитель", "россия", "рф", "гост",
+    "в/с", "высший", "сорт", "для", "под", "или", "кг", "шт"
+}
+
+SYNONYMS: dict[str, str] = {
+    "шампиньон": "грибы",
+    "вешенк": "грибы",
+    "укроп": "зелень",
+    "петрушк": "зелень",
+}
+
+
+def clean_orgpage_queries(query: str) -> list[str]:
+    """Очистка запроса для OrgPage от стоп-слов («купить», «свежие», «оптом»).
+    Движок OrgPage делает нестрогий OR по всем словам запроса!
+    Если отправить «купить шампиньоны свежие» — он ищет «купить OR шампиньоны OR свежие»,
+    и по слову «свежие» находит кондиционеры («Свежий ветер») и стоматологию («Свежее дыхание»),
+    а по слову «купить» — тренажеры и резину!
+    Отправлять нужно ТОЛЬКО существительные-предметы закупки и категории («шампиньоны», «грибы»)."""
+    words = [re.sub(r"[^а-яёa-z0-9]", "", w.lower()) for w in (query or "").split()]
+    meaningful = [w for w in words if len(w) >= 3 and w not in STOP_WORDS]
+    if not meaningful:
+        return [query]
+
+    queries = [meaningful[0]]
+    if len(meaningful) > 1:
+        queries.append(f"{meaningful[0]} {meaningful[1]}")
+    for stem, syn in SYNONYMS.items():
+        if stem in query.lower() and syn not in queries:
+            queries.append(syn)
+            break
+    return queries
+
+
 @dataclass(slots=True)
 class OrgpageHit:
     name: str
@@ -174,14 +211,9 @@ async def search_orgpage(query: str, region_name: str, limit: int = 30) -> list[
     }
 
     # 1. Поиск через JSON API OrgPage
-    search_queries = [
-        f"купить {query}",
-        query,
-    ]
-    # Если запрос многословный (например, «шампиньоны свежие опт»), добавим базовое слово
-    first_word = query.split()[0].strip()
-    if len(first_word) >= 4 and first_word not in query:
-        search_queries.append(first_word)
+    # Очищаем запрос от стоп-слов («купить», «свежие», «опт»), чтобы не ловить
+    # частичные OR-совпадения на посторонние компании
+    search_queries = clean_orgpage_queries(query)
 
     async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
         for sq in search_queries[:2]:
