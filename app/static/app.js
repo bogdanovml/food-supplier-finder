@@ -612,7 +612,8 @@ async function openDossier(row) {
       inactive: "Юрлицо неактивно (ликвидация/реорганизация)",
       geo: "Другой город при поиске по федеральному городу",
       no_contacts: "Нет полных контактов",
-      not_supplier: "Не поставщик (товар/декор/розница) — LLM-вычитка",
+      not_supplier: "Не поставщик (товар/декор/агрегатор) — LLM-вычитка",
+      offtopic: "Чужой профиль товаров / зомби-сайт (вердикт LLM обхода)",
     };
     const reason = reasons[row.reason] || row.reason_label || row.reason || "отсеяно";
     const body = `
@@ -1264,9 +1265,12 @@ async function switchView(view) {
       { title: "Причина отсева", field: "reason", widthGrow: 1.5, formatter: (cell) => {
           const r = cell.getValue();
           const map = {
-            no_legal:  ["bg-secondary", "Нет юрлица (ИНН/ОГРН не найдены)"],
-            inactive:  ["bg-danger", "Юрлицо неактивно"],
-            geo:       ["bg-warning text-dark", "Другой город"],
+            no_legal:     ["bg-secondary", "Нет юрлица (ИНН/ОГРН не найдены)"],
+            inactive:     ["bg-danger", "Юрлицо неактивно"],
+            geo:          ["bg-warning text-dark", "Другой город"],
+            no_contacts:  ["bg-secondary", "Нет контактов"],
+            not_supplier: ["bg-dark", "Не поставщик / агрегатор"],
+            offtopic:     ["bg-danger", "Чужой профиль / зомби-сайт"],
           };
           const [cls, label] = map[r] || ["bg-secondary", r];
           return `<span class="badge ${cls}">${label}</span>`;

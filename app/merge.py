@@ -44,8 +44,13 @@ DOMAIN_BLACKLIST: set[str] = {
     "fl.ru", "b2b-center.ru", "prodirectory.ru", "foodbay.com", "prodal.ru",
     "suplfood.ru", "foods.ru", "mosex.name", "agrorus.com", "opt-union.ru",
     "sakh.com", "bloha.ru", "tenderguru.ru", "sdelanogroup.ru", "supl.biz",
-    "supplier.ru", "b2b-postavshhik.ru", "predpr.ru",
+    "supplier.ru", "b2b-postavshhik.ru", "predpr.ru", "deal.by",
     "agroserver.ru", "suppliers.ru", "postavshhikov.net", "1sept.ru",
+    "productcenter.ru", "cataloxy.ru", "orgpage.ru", "orgs.biz", "blizko.ru",
+    "regtorg.ru", "glavtorg.com", "flagma.ru", "b2b-russia.ru", "promportal.su",
+    "all-gorod.ru", "spravker.ru", "jsprav.ru", "fis.ru", "propartner.ru",
+    "grainboard.ru", "meatinfo.ru", "milknet.ru", "foodmarkets.ru",
+    "postavshhiki.ru", "postavshikov.ru", "optom.ru", "yp.ru", "allbiz.ru",
     # досье/вакансии/финансы — не сайты поставщиков
     "hh.ru", "superjob.ru", "spark-interfax.ru", "audit-it.ru", "casebook.ru",
     "saby.ru", "kontur.ru", "tochka.com", "klerk.ru", "star-pro.ru",
@@ -59,7 +64,7 @@ DOMAIN_BLACKLIST: set[str] = {
     "vk.com", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",
     "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru",
     # досье/новости
-    " Kommersant", "rbc.ru", "vedomosti.ru", "ria.ru", "tass.ru",
+    "kommersant.ru", "rbc.ru", "vedomosti.ru", "ria.ru", "tass.ru",
 }
 
 
@@ -77,7 +82,12 @@ def domain_key(url: str) -> str:
 
 
 def is_blacklisted(domain: str) -> bool:
-    return domain in DOMAIN_BLACKLIST
+    if not domain:
+        return False
+    domain = domain.lower().strip()
+    return domain in DOMAIN_BLACKLIST or any(
+        domain == b or domain.endswith("." + b) for b in DOMAIN_BLACKLIST
+    )
 
 
 def _clean_city(raw: str | None) -> str:
@@ -527,7 +537,7 @@ def apply_enrichment(card: SupplierCard, facts) -> None:
     #   profile   — профильный поставщик.
     if facts.match == "offtopic" or facts.irrelevant:
         card.enrichment_status = "offtopic"
-        card.relevance = max(0, card.relevance - 25)
+        card.relevance = 0
         _apply_contact_facts(card, facts)
         return
     card.enrichment_status = "done"

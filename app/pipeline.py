@@ -303,20 +303,26 @@ _TR = {"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "
 
 
 def _brand_matches(brand: str, legal_name: str) -> bool:
-    """Бренд-матч валиден, если бренд сидит в транслите имени из ЕГРЮЛ
-    как сегмент/подстрока, либо почти равен сегменту (fuzzy>=85 —
-    ловит defagroup/ДЕФАГРУПП=89). Короткие сегменты (<4) игнорируются:
-    иначе '23' из «ОПТИМУМ 23» ложно сидит в 'opt23'."""
+    """Бренд-матч валиден, если бренд точно совпадает с сегментом транслита
+    (morfish == morfish) либо почти равен сегменту (fuzzy>=85 — defagroup/ДЕФАГРУПП=89).
+    Произвольные подстроки для коротких брендов ЗАПРЕЩЕНЫ: иначе 'orgs' ложно
+    матчится в 'orgsintez' (ООО «Группа Оргсинтез»!), 'opt23' в 'optimum23'."""
     from rapidfuzz import fuzz
     translit = "".join(_TR.get(ch, ch) for ch in legal_name.lower())
     translit = re.sub(r"[^a-z0-9]", " ", translit)
-    b = brand.lower()
+    b = brand.lower().strip()
+    if len(b) < 3:
+        return False
     for seg in translit.split():
-        if len(seg) < 4:
+        if len(seg) < 3:
             continue
-        if b == seg or b in seg or seg in b:
+        if b == seg:
             return True
         if len(b) >= 5 and fuzz.ratio(b, seg) >= 85:
+            return True
+        # подстрока разрешена ТОЛЬКО для длинных специфичных брендов (>=8 букв),
+        # например interfoodgroup в interfoodgrouprus, но НЕ для коротких корней
+        if len(b) >= 8 and (b in seg or seg in b):
             return True
     return False
 
@@ -738,7 +744,8 @@ async def _vet_suppliers(cards: list, query: str, emit: Emit) -> list:
 Ниже список найденных карточек с описанием деятельности.
 Определи, какие карточки РЕЛЕВАНТНЫ предмету закупки:
 - ДА: компания производит, поставляет или оптом продаёт искомый товар (или близкую товарную группу: плодоовощная продукция/зелень для овощей/грибов, бакалея для муки/круп, рыбопродукты для рыбы, HoReCa-поставки продуктов питания).
-- НЕТ: компании ЯВНО ДРУГОЙ отрасли (птицефабрики/яйца/мясо/рыба при поиске грибов!, автовыкуп, мебель, игрушки, стройматериалы, металл), а также товарные позиции каталогов («Горбуша 800г»), декор, розничные магазины.
+- НЕТ: сайты-каталоги, агрегаторы, справочники компаний, доски объявлений (productcenter.ru, cataloxy.ru, orgpage.ru, orgs.biz, tiu.ru, pulscen, regtorg, avito, all.biz и любые каталоги/справочники со списками фирм) — они НЕ поставщики!;
+  компании ЯВНО ДРУГОЙ отрасли (птицефабрики/яйца/мясо/рыба при поиске грибов!, автовыкуп, мебель, игрушки, стройматериалы, металл), а также товарные позиции каталогов («Горбуша 800г»), декор, розничные магазины.
 
 {chr(10).join(lines)}
 
@@ -934,6 +941,16 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                 c.enrichment_status = "failed"
         await emit({"type": "stage", "stage": "enrich", "status": "done",
                     "found": sum(1 for c in cards if c.enrichment_status == "done")})
+
+        # --- 5.1 Исключаем нерелевантные сайты (offtopic по вердикту LLM обхода:
+        #     зомби-сайты, каталоги масел/автозапчастей/одежды, спам-шаблоны) ---
+        offtopic_cards = [c for c in cards if c.enrichment_status == "offtopic"]
+        if offtopic_cards:
+            db.insert_excluded(search_id, [_row(c) for c in offtopic_cards], "offtopic")
+            cards = [c for c in cards if c.enrichment_status != "offtopic"]
+            stats["excluded_offtopic"] = len(offtopic_cards)
+            await emit({"type": "stage", "stage": "enrich", "status": "run",
+                        "message": f"исключено нерелевантных сайтов (offtopic): {len(offtopic_cards)}"})
 
         # --- 5.5 Поздний резолв: юрлицо из реквизитов сайтов + повторный
         #     отсев неактивных (ранний бренд-лукап мог и промазать/промолчать)
