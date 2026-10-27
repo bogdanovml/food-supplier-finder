@@ -216,7 +216,7 @@ _LINK_RULES: list[tuple[str, re.Pattern]] = [
 _NAV_NOISE = re.compile(r"войти|регистр|корзин|личн|политик|cookie|ваканс", re.I)
 
 
-def extract_site_links(html: str, base_url: str, limit: int = 40) -> list[tuple[str, str]]:
+def extract_site_links(html: str, base_url: str, limit: int = 100) -> list[tuple[str, str]]:
     """Все внутренние ссылки с текстами якорей: [(abs_url, anchor), ...]."""
     base_host = _up(base_url).netloc.removeprefix("www.")
     out, seen = [], set()
@@ -263,7 +263,7 @@ async def llm_classify_links(base_url: str,
     if not links:
         return out
     lines = "\n".join(f"{i+1}. \"{anchor}\" — {absu}"
-                      for i, (absu, anchor) in enumerate(links[:40]))
+                      for i, (absu, anchor) in enumerate(links[:80]))
     prompt = f"""Ниже список ссылок с главной страницы сайта поставщика "{base_url}".
 Определи, какие ссылки ведут на страницы:
 - prices: прайсы, каталоги, витрины товаров с ценами (ИМЕННО страницы с перечнем товаров/цен)
@@ -309,9 +309,24 @@ async def sitemap_pages(base_url: str) -> dict[str, list[str]]:
     try:
         root = f"{urlparse(base_url).scheme}://{urlparse(base_url).netloc}"
         seen_maps: set[str] = set()
+
+        def _sm_priority(u: str) -> int:
+            # триаж: статические страницы (page/misc) содержат реквизиты,
+            # доставку, контакты; товарные sitemap — тысячи ссылок без пользы
+            low = u.lower()
+            if "misc" in low:
+                return 0
+            if "page" in low:
+                return 1
+            if re.search(r"product|tax|pt-product|item", low):
+                return 99  # пропускаем
+            if "post" in low:
+                return 3
+            return 2
+
         queue = [root + "/sitemap.xml"]
         urls: list[str] = []
-        while queue and len(seen_maps) < 4:
+        while queue and len(seen_maps) < 7:
             sm_url = queue.pop(0)
             if sm_url in seen_maps:
                 continue
@@ -322,9 +337,12 @@ async def sitemap_pages(base_url: str) -> dict[str, list[str]]:
             locs = _SITEMAP_RE.findall(raw)
             for loc in locs:
                 if loc.endswith(".xml"):
-                    queue.append(loc)
+                    if _sm_priority(loc) < 90:
+                        queue.append(loc)
                 else:
                     urls.append(loc)
+            # страничные подсitemap — вперёд товарных
+            queue.sort(key=_sm_priority)
             if len(urls) > 400:
                 break
         if not urls:  # sitemap нет — попробуем robots.txt
@@ -761,12 +779,17 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             return None
 
     async def _delivery_page():
-        if not use_llm or not link_cats["delivery"]:
+        if not use_llm:
             return None
-        if facts.delivery and len(facts.delivery) >= 150 and facts.order_terms:
-            return None
+        # классификатор молчит -> типовая проба /dostavka/ (самый частый путь;
+        # кейс fruitsparadise.ru: мега-меню за лимитом ссылок, sitemap-страницы
+        # не прочитаны — а зона доставки «Москва МКАД+5» лежит именно там)
+        durl = link_cats["delivery"][0] if link_cats["delivery"] \
+            else f"{_up(url).scheme or 'https'}://{_up(url).netloc}/dostavka/"
         try:
-            dtext = _text_of(await fetch_html(link_cats["delivery"][0]) or "")
+            dtext = _text_of(await fetch_html(durl) or "")
+            if len(dtext) < 150 and not link_cats["delivery"]:
+                return (None, None, None, None)  # проба мимо — не выдумываем
             df = regex_facts(url, dtext)
             summary, dcity, dgeo = None, None, None
             if dtext:
