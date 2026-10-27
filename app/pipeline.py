@@ -43,7 +43,7 @@ STAGES = ["plan", "serp", "optlist", "gosplan", "directory", "merge",
           "enrich", "company", "structure", "done"]
 
 
-async def _plan_queries(query: str, emit: Emit) -> tuple[list[str], list[str], list[str]]:
+async def _plan_queries(query: str, region_name: str, emit: Emit) -> tuple[list[str], list[str], list[str]]:
     """LLM строит поисковые запросы + ОКПД2 (госконтракты) + ОКВЭД (ЕГРЮЛ-каталог).
 
     ОКПД2 валидируется по справочнику; ОКВЭД самовалидируется каталогом
@@ -54,9 +54,13 @@ async def _plan_queries(query: str, emit: Emit) -> tuple[list[str], list[str], l
     okved_raw: list[str] = []
     try:
         data = await ask_json(
-            f'Товар: "{query}". '
+            f'Товар: "{query}". Регион закупки: "{region_name}" '
+            f'(поставщик должен работать или доставлять именно в нём). '
             f'1) Составь 2-3 поисковых запроса для Яндекса, чтобы найти ОПТОВЫХ '
-            f'поставщиков/производителей этого товара в России. '
+            f'поставщиков/производителей этого товара. Обязательно включи в 1-2 '
+            f'запроса название региона или города-центра («... {region_name}») — '
+            f'иначе выдача забита SEO-москвичами, а локальные производители '
+            f'(например, грибные фермы Челябинска) не находятся. '
             f'2) Назови 1-3 кода ОКПД2 (российский классификатор продукции), '
             f'к которым относится товар (мука -> 10.61.21). '
             f'3) Назови 1-2 кода ОКВЭД2 (классификатор видов деятельности), '
@@ -70,6 +74,9 @@ async def _plan_queries(query: str, emit: Emit) -> tuple[list[str], list[str], l
     except LLMError:
         pass
     queries = queries or [f"{query} оптом", f"{query} производитель купить"]
+    # страховка: хотя бы один запрос обязан содержать регион
+    if not any(region_name.split()[0].lower() in q.lower() for q in queries):
+        queries.append(f"{query} оптовый поставщик {region_name}")
 
     codes = validate_codes(codes_raw)
     for c, _n in suggest_codes(query, limit=2):
@@ -817,7 +824,7 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
     t0 = time.monotonic()
 
     try:
-        queries, codes, okved = await _plan_queries(query, emit)
+        queries, codes, okved = await _plan_queries(query, region_name, emit)
 
         await emit({"type": "stage", "stage": "merge", "status": "pending"})
         # четыре источника параллельно
@@ -989,6 +996,13 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
                                        f"«{region_name}» заявлена на сайте")
                 else:
                     continue  # чужой город без доставки к нам — вон из выдачи
+            elif not c.city and not c.delivery_geo and not _delivers_here(c):
+                # регион не подтверждён никак (город и гео не определены,
+                # федеральной доставки нет) — не претендент на топ региона:
+                # пессимизируем, не вырезая потенциальных локалов
+                # (кейс sr-pomidor: московский «фантом» в челябинской выдаче)
+                c.relevance = max(0, c.relevance - 10)
+                c.sources["гео"] = "регион не подтверждён: город не определён"
             kept_geo.append(c)
         geo_dump = [c for c in cards if c not in kept_geo]
         if geo_dump:
