@@ -952,6 +952,38 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             await emit({"type": "stage", "stage": "enrich", "status": "run",
                         "message": f"исключено нерелевантных сайтов (offtopic): {len(offtopic_cards)}"})
 
+        # --- 5.2 Проверка подтверждения профиля товара:
+        # Если сайт компании не удалось прочитать (или сайта нет), мы НЕ имеем права
+        # включать её в выдачу закупщику, если ни в названии, ни в описании нет ни одного
+        # слова из поискового запроса, и нет подтвержденных контрактов/цен!
+        # (иначе случайный дохлый сайт кондиционеров или игрушек пролезает в шампиньоны)
+        from app.sources.gosplan import get_core_stems
+        core_stems = get_core_stems(query)
+
+        def _is_relevance_confirmed(c) -> bool:
+            # 1. LLM подтвердил при обходе сайта
+            if c.enrichment_status == "done":
+                return True
+            # 2. Есть подтвержденные госконтракты 44-ФЗ по товару
+            if c.gov_contracts_count > 0:
+                return True
+            # 3. Есть подтвержденные цены на товар
+            if c.price_min or c.price_note:
+                return True
+            # 4. В названии, описании или домене ЕСТЬ корень искомого товара
+            blob = f"{c.name or ''} {c.description or ''} {c.domain or ''} {c.legal_name or ''}".lower()
+            if core_stems and any(s in blob for s in core_stems):
+                return True
+            return False
+
+        unconfirmed = [c for c in cards if not _is_relevance_confirmed(c)]
+        if unconfirmed:
+            db.insert_excluded(search_id, [_row(c) for c in unconfirmed], "offtopic")
+            cards = [c for c in cards if _is_relevance_confirmed(c)]
+            stats["excluded_offtopic"] = stats.get("excluded_offtopic", 0) + len(unconfirmed)
+            await emit({"type": "stage", "stage": "enrich", "status": "run",
+                        "message": f"исключено неподтвержденных карточек: {len(unconfirmed)}"})
+
         # --- 5.5 Поздний резолв: юрлицо из реквизитов сайтов + повторный
         #     отсев неактивных (ранний бренд-лукап мог и промазать/промолчать)
         await _late_legal_resolve(cards, emit)

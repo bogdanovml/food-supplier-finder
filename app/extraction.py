@@ -135,20 +135,38 @@ def normalize_price(raw: str) -> tuple[float, str] | None:
 
 
 async def fetch_html(url: str) -> str:
-    """GET страницы с таймаутом; ошибки и редиректы-помойки -> ''."""
-    try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True,
-                                     headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0 Safari/537.36"}) as c:
-            resp = await c.get(url)
-            if resp.status_code != 200 or len(resp.content) > PAGE_LIMIT:
-                return ""
-            ctype = resp.headers.get("content-type", "")
-            if "html" not in ctype and "text" not in ctype:
-                return ""
-            return resp.text
-    except httpx.HTTPError:
+    """GET страницы с таймаутом; ошибки и редиректы-помойки -> ''.
+    Поддерживает fallback https -> http, игнорирует невалидные SSL-сертификаты (verify=False),
+    корректно декодирует windows-1251 / cp1251 (часто у старых оптовых баз)."""
+    if not url:
         return ""
+    urls_to_try = [url]
+    if url.startswith("https://"):
+        urls_to_try.append("http://" + url[8:])
+    elif url.startswith("http://"):
+        urls_to_try.append("https://" + url[7:])
+
+    for u in urls_to_try:
+        try:
+            async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True,
+                                         verify=False,
+                                         headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0 Safari/537.36"}) as c:
+                resp = await c.get(u)
+                if resp.status_code == 200 and len(resp.content) <= PAGE_LIMIT:
+                    raw = resp.content
+                    ctype = resp.headers.get("content-type", "").lower()
+                    if "html" not in ctype and "text" not in ctype:
+                        continue
+                    if "windows-1251" in ctype or "cp1251" in ctype or b"charset=windows-1251" in raw[:1000].lower() or b"charset=\"windows-1251\"" in raw[:1000].lower():
+                        try:
+                            return raw.decode("cp1251", errors="replace")
+                        except Exception:
+                            pass
+                    return resp.text
+        except Exception:
+            continue
+    return ""
 
 
 def regex_facts(url: str, text: str) -> SiteFacts:
@@ -636,10 +654,16 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     html = await fetch_html(url)
     if not html:
         # httpx заблокирован анти-ботом (кейс auchan.ru: 0 байт) — рендер браузером
-        rendered = await render_html(url)
-        if not rendered:
-            return SiteFacts(url=url, method="failed")
-        html = rendered
+        html = await render_html(url)
+    # Если глубокая страница из выдачи дала 404/пусто — пробуем корень сайта
+    if not html and _up(url).netloc:
+        root_url = f"{_up(url).scheme or 'https'}://{_up(url).netloc}/"
+        if root_url.rstrip("/") != url.rstrip("/"):
+            html = await fetch_html(root_url)
+            if not html:
+                html = await render_html(root_url)
+    if not html:
+        return SiteFacts(url=url, method="failed")
     full_text = _text_of(html)
     facts = regex_facts(url, full_text)
     facts.rendered = True

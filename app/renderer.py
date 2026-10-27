@@ -64,9 +64,16 @@ async def render_page(url: str, *, wait_ms: int = 4000, max_bytes: int = 3_000_0
         await sem.acquire()
         acquired = True  # acquired=False если сам acquire провалился
         await _ensure_browser()
-        page = await _browser.new_page(user_agent=UA, locale="ru-RU")
+        page = await _browser.new_page(user_agent=UA, locale="ru-RU", ignore_https_errors=True)
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            except Exception as goto_exc:
+                if url.startswith("https://"):
+                    http_url = "http://" + url[8:]
+                    await page.goto(http_url, wait_until="domcontentloaded", timeout=20000)
+                else:
+                    raise goto_exc
             await page.wait_for_timeout(wait_ms)
             html = await page.content()
             if len(html) > max_bytes:
