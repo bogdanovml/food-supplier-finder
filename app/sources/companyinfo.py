@@ -314,13 +314,14 @@ async def _by_inn_raw(inn: str) -> CompanyInfo | None:
     return _parse_card(html, url=f"{BASE}/search?query={inn}")
 
 
-async def by_name(name: str, *, min_score: int = 75, trust_first: bool = False) -> CompanyInfo | None:
+async def by_name(name: str, *, city: str | None = None, min_score: int = 75, trust_first: bool = False) -> CompanyInfo | None:
     """Кэшируется с параметрами в ключе (30 дней)."""
-    key = f"name:{name.strip().lower()}:{min_score}:{int(trust_first)}"
-    return await _dadata_cached(key, lambda: _by_name_raw(name, min_score, trust_first))
+    clean_city = (city or "").strip().lower()
+    key = f"name:{name.strip().lower()}:{clean_city}:{min_score}:{int(trust_first)}"
+    return await _dadata_cached(key, lambda: _by_name_raw(name, city=city, min_score=min_score, trust_first=trust_first))
 
 
-async def _by_name_raw(name: str, min_score: int = 75, trust_first: bool = False) -> CompanyInfo | None:
+async def _by_name_raw(name: str, *, city: str | None = None, min_score: int = 75, trust_first: bool = False) -> CompanyInfo | None:
     """Юрлицо по названию: DaData suggest -> fuzzy-валидация -> checko (фолбэк).
 
     Валидация обязательна: «Ромашка» найдёт десятки тёзок по всей стране —
@@ -333,14 +334,21 @@ async def _by_name_raw(name: str, min_score: int = 75, trust_first: bool = False
     # DaData suggest по имени без оргформы точнее: «ООО Югоптторг-23» с
     # приставкой тянет тёзок (ЮГОПТТОРГ-Ростов вместо ЮГОПТТОРГ-23)
     clean = re.sub(r"^(ООО|АО|ПАО|ЗАО|ИП|АНО|ОАО|ФГУП)\s*", "", clean).strip()
-    if len(clean) < 4:
+    if len(clean) < 3:
         return None
 
-    suggestions = await _dadata("suggest/party", {"query": clean, "count": 5})
+    query = f"{clean} {city.strip()}" if city and city.strip() and city.strip() not in ("—", "-") else clean
+    suggestions = await _dadata("suggest/party", {"query": query, "count": 5})
     if suggestions:
         best = None
         for s in suggestions:
-            score = fuzz.token_sort_ratio(clean.lower(), s.get("value", "").lower())
+            s_val = s.get("value", "")
+            s_clean = re.sub(r"[«»\"']", "", s_val).strip()
+            s_clean = re.sub(r"^(ООО|АО|ПАО|ЗАО|ИП|АНО|ОАО|ФГУП)\s*", "", s_clean).strip()
+            score = max(
+                fuzz.token_sort_ratio(clean.lower(), s_clean.lower()),
+                fuzz.ratio(clean.lower(), s_clean.lower()),
+            )
             if best is None or score > best[1]:
                 best = (s, score)
         if best and (trust_first or best[1] >= min_score):

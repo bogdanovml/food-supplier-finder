@@ -24,6 +24,7 @@ from .extraction import normalize_price
 from .sources.directory import DirectoryHit
 from .sources.gosplan import GovSupplier
 from .sources.optlist import OptlistHit
+from .sources.orgpage import OrgpageHit
 from .sources.xmlstock import SerpHit
 
 _tld = tldextract.TLDExtract(suffix_list_urls=())  # встроенный снапшот PSL — офлайн
@@ -259,8 +260,9 @@ class SupplierCard:
 
 
 def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSupplier],
-              directory: list[DirectoryHit], region_name: str) -> list[SupplierCard]:
-    """Слияние четырёх источников в список карточек."""
+              directory: list[DirectoryHit], region_name: str,
+              orgpage: list[OrgpageHit] | None = None) -> list[SupplierCard]:
+    """Слияние источников в список карточек."""
     cards: list[SupplierCard] = []
 
     # --- 1. госконтракты: самый сильный источник (реальные сделки) ---
@@ -355,6 +357,47 @@ def merge_all(serp: list[SerpHit], optlist: list[OptlistHit], gov: list[GovSuppl
         )
         cards.append(card)
         have_domains.add(d)
+
+    # --- 5. Отраслевой справочник orgpage.ru (локальные организации с адресами и телефонами) ---
+    if orgpage:
+        for oh in orgpage:
+            target = None
+            if oh.domain:
+                for c in cards:
+                    if c.domain and c.domain == oh.domain:
+                        target = c
+                        break
+            if target is None:
+                for c in cards:
+                    if fuzz.partial_ratio(oh.name.lower(), c.name.lower()) >= 88:
+                        target = c
+                        break
+            if target:
+                for p in oh.phones:
+                    if p not in target.phones:
+                        target.phones.append(p)
+                if not target.city:
+                    target.city = oh.city
+                if not target.description and oh.description:
+                    target.description = oh.description
+                if not target.site and oh.site:
+                    target.site = oh.site
+                    target.domain = oh.domain
+                target.sources["справочник"] = f"orgpage.ru ({oh.city}): телефон, адрес"
+            else:
+                card = SupplierCard(
+                    name=oh.name,
+                    domain=oh.domain or "",
+                    site=oh.site or "",
+                    city=oh.city,
+                    region=region_name,
+                    phones=list(oh.phones),
+                    description=oh.description,
+                    sources={"справочник": f"orgpage.ru ({oh.city}): телефон, адрес, сайт"},
+                )
+                cards.append(card)
+                if oh.domain:
+                    have_domains.add(oh.domain)
 
     _score_all(cards, serp)
     return cards

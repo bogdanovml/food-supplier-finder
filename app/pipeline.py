@@ -120,31 +120,29 @@ async def _run_optlist(query: str, emit: Emit) -> list:
         return []
 
 
-async def _run_directory(okved_codes: list[str], region_name: str, emit: Emit) -> list:
+async def _run_directory(query: str, okved_codes: list[str], region_name: str, emit: Emit) -> tuple[list, list]:
     await emit({"type": "stage", "stage": "directory", "status": "start",
-                "message": f"ЕГРЮЛ-каталог по ОКВЭД: {', '.join(okved_codes) or '—'} "
-                           f"(действующие юрлица отрасли, фильтр: {region_name})"})
-    if not okved_codes:
-        await emit({"type": "stage", "stage": "directory", "status": "skipped",
-                    "message": "LLM не предложил ОКВЭД-кодов"})
-        return []
+                "message": f"Отраслевой каталог (orgpage.ru) в регионе {region_name}"})
+    org_hits = []
     try:
-        hits = await directory_src.search_okved_directory(
-            okved_codes, region_name=region_name, max_per_code=100)
-        status = "done" if hits else "skipped"
-        msg = "" if hits else (
-            "checko ограничивает запросы (капча) — реестр юрлиц временно "
-            "недоступен, выдача компенсируется другими источниками"
-            if directory_src.CHECKO_BLOCKED else
-            f"по ОКВЭД {', '.join(okved_codes)} в регионе ничего не найдено")
-        await emit({"type": "stage", "stage": "directory", "status": status,
-                    "found": len(hits), "message": msg})
-        return hits
+        from app.sources import orgpage as orgpage_src
+        org_hits = await orgpage_src.search_orgpage(query, region_name)
     except Exception as exc:
-        logger.warning("directory stage failed: %s", exc)
-        await emit({"type": "stage", "stage": "directory", "status": "skipped",
-                    "message": f"каталог ОКВЭД пропущен: {exc}"})
-        return []
+        logger.warning("orgpage failed: %s", exc)
+
+    dir_hits = []
+    if okved_codes and not directory_src.CHECKO_BLOCKED:
+        try:
+            dir_hits = await directory_src.search_okved_directory(
+                okved_codes, region_name=region_name, max_per_code=50)
+        except Exception:
+            pass
+
+    total = len(org_hits) + len(dir_hits)
+    msg = f"найдено {total} организаций в регионе {region_name}" if total else "в каталоге ничего не найдено"
+    await emit({"type": "stage", "stage": "directory", "status": "done" if total else "skipped",
+                "found": total, "message": msg})
+    return dir_hits, org_hits
 
 
 async def _run_gosplan(query: str, region_code: int, classifiers: list[str],
@@ -369,7 +367,7 @@ async def _resolve_legal(cards: list, emit: Emit, limit: int = 30) -> None:
                         if info and not _brand_matches(brand, info.legal_name or ""):
                             info = None  # тёзка, не наша компания
                     if not info and c.name and not c.name.startswith("http"):
-                        info = await companyinfo_src.by_name(c.name)
+                        info = await companyinfo_src.by_name(c.name, city=c.city)
                     if info:
                         c.inn = info.inn
                         c.sources["юрлицо"] = "ЕГРЮЛ (dadata.ru): найдено по бренду сайта"
@@ -650,7 +648,7 @@ async def _late_legal_resolve(cards: list, emit: Emit) -> None:
     async def _late_one(c) -> None:
         async with _sem:
             try:
-                info = await companyinfo_src.by_name(c.legal_name)
+                info = await companyinfo_src.by_name(c.legal_name, city=c.city)
                 if not info or not info.inn:
                     return
                 c.inn = info.inn
@@ -828,20 +826,20 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
 
         await emit({"type": "stage", "stage": "merge", "status": "pending"})
         # четыре источника параллельно
-        serp_hits, opt_hits, gov_sup, dir_hits = await asyncio.gather(
+        serp_hits, opt_hits, gov_sup, (dir_hits, org_hits) = await asyncio.gather(
             _run_serp(queries, lr, emit),
             _run_optlist(query, emit),
             _run_gosplan(query, gos_region, codes, emit),
-            _run_directory(okved, region_name, emit),
+            _run_directory(query, okved, region_name, emit),
         )
         stats["serp"] = len(serp_hits)
         stats["optlist"] = len(opt_hits)
         stats["gosplan"] = len(gov_sup)
-        stats["directory"] = len(dir_hits)
+        stats["directory"] = len(dir_hits) + len(org_hits)
 
         # --- merge ---
         await emit({"type": "stage", "stage": "merge", "status": "start"})
-        cards = merge_all(serp_hits, opt_hits, gov_sup, dir_hits, region_name)
+        cards = merge_all(serp_hits, opt_hits, gov_sup, dir_hits, region_name, orgpage=org_hits)
         # LLM-вычитка списка: товары/декор/каталожные позиции — не поставщики;
         # не должны ни стримиться в таблицу, ни тратить бюджет обходов
         _before_vet = len(cards)
