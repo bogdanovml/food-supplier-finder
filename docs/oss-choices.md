@@ -10,7 +10,7 @@
 |---|---|---|
 | SERP-клиент | `AI/seo/clustering` (XMLstockClient) | парсер `<yandexsearch>` XML, региональный `lr`, семафоры — адаптирован, допилен Google |
 | Госплан-клиент | `tender/nmck` (GosplanClient) | знания про таймауты/retries/read-разрывы API, схема деталей контракта |
-| Price extraction | `ai-tools.su/search` (price_extractor) | идея «дешёвый regex → дорогой LLM fallback», структура PriceResult |
+| Price extraction | раннего проекта (price_extractor) | идея «дешёвый regex → дорогой LLM fallback», структура PriceResult |
 | LLM-клиент | `tender/nmck` (llm.py) | retry-логика, OpenAI-compatible payload |
 | Формат RFQ-письма | `web/text-gen` (drafter) | структура письма: контекст → требование → вопрос |
 
