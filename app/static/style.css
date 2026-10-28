@@ -277,8 +277,8 @@ body.app-body {
 .tabulator-cell {
   padding: 8px 10px !important;
   vertical-align: middle !important;
-  display: inline-flex !important;
-  align-items: center !important;
+  white-space: normal !important;
+  word-break: break-word;
 }
 
 /* Badges */

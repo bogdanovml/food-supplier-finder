@@ -417,24 +417,24 @@ function buildTable() {
       {
         title: "Поставщик",
         field: "name",
-        widthGrow: 2,
-        minWidth: 160,
+        widthGrow: 0.6,
+        minWidth: 165,
         headerSort: true,
         formatter: (cell) => {
           const d = cell.getData();
           const kind = (d.sources && d.sources["тип"]) || "";
           const kindTag = kind.includes("производитель")
-            ? '<span class="text-muted small ms-1">производитель</span>'
+            ? '<span class="text-muted ms-1" style="font-size:10px;font-weight:400">(произв.)</span>'
             : kind.includes("дистрибьютер") || kind.includes("дистрибьютор")
-              ? '<span class="text-muted small ms-1">дистрибьютер</span>'
+              ? '<span class="text-muted ms-1" style="font-size:10px;font-weight:400">(дистриб.)</span>'
               : "";
-          return `<div class="fw-semibold text-dark">${escapeHtml(d.name)}${kindTag}</div>`;
+          return `<div class="fw-semibold text-dark text-truncate" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}${kindTag}</div>`;
         }
       },
       {
         title: "Регион доставки",
         field: "delivery_geo",
-        width: 120,
+        width: 130,
         headerSort: true,
         sorter: "string",
         formatter: (cell) => {
@@ -447,16 +447,16 @@ function buildTable() {
       {
         title: "Условия поставки",
         field: "min_order",
-        widthGrow: 1.3,
-        minWidth: 150,
+        widthGrow: 3.5,
+        minWidth: 280,
         headerSort: false,
         formatter: (cell) => {
           const d = cell.getData();
           const bits = [];
-          if (d.min_order) bits.push(`<span class="badge bg-light text-dark border" style="font-size:11px">${escapeHtml(d.min_order)}</span>`);
-          if (d.delivery) bits.push(`<div class="text-truncate" style="font-size:11px" title="${escapeHtml(d.delivery)}">${escapeHtml(d.delivery.slice(0, 90))}</div>`);
+          if (d.min_order) bits.push(`<span class="badge bg-light text-dark border me-1" style="font-size:10px;font-weight:600">${escapeHtml(d.min_order)}</span>`);
+          if (d.delivery) bits.push(`<span style="font-size:11px;color:#334155">${escapeHtml(d.delivery)}</span>`);
           if (!bits.length) return '<span class="text-muted small">—</span>';
-          return bits.join("");
+          return `<div style="font-size:11px;line-height:1.35;word-break:break-word" title="${escapeHtml(d.delivery || d.min_order)}">${bits.join(" ")}</div>`;
         }
       },
       {
@@ -478,7 +478,7 @@ function buildTable() {
       {
         title: "Email",
         field: "emails",
-        width: 150,
+        width: 140,
         headerSort: false,
         formatter: (cell) => {
           const arr = cell.getValue() || [];
@@ -489,8 +489,7 @@ function buildTable() {
       {
         title: "Прайс-листы",
         field: "product_links",
-        widthGrow: 1.4,
-        minWidth: 130,
+        width: 105,
         headerSort: false,
         formatter: (cell) => {
           const d = cell.getData();
@@ -498,15 +497,15 @@ function buildTable() {
           if (!links.length) return '<span class="text-muted small">По запросу</span>';
           return `<div class="d-flex flex-column" style="font-size:12px">` +
             links.map((u, i) =>
-              `<a href="${escapeHtml(u)}" target="_blank" rel="noopener" class="text-decoration-none text-truncate" style="max-width:220px" title="${escapeHtml(u)}">${i === 0 ? "Прайс-лист" : "Каталог"} ↗</a>`).join("") +
+              `<a href="${escapeHtml(u)}" target="_blank" rel="noopener" class="text-decoration-none text-truncate" style="max-width:100px" title="${escapeHtml(u)}">${i === 0 ? "Прайс-лист" : "Каталог"} ↗</a>`).join("") +
             `</div>`;
         }
       },
       {
         title: "Надёжность",
         field: "gov_contracts_count",
-        widthGrow: 1.2,
-        minWidth: 120,
+        widthGrow: 2.0,
+        minWidth: 240,
         hozAlign: "left",
         headerSort: true,
         sorter: "number",
