@@ -41,12 +41,12 @@ def _domain_of(url: str) -> str:
         return ""
 
 
-def parse_yandex_xml(xml_text: str, *, engine: str, query: str, top: int) -> list[SerpHit]:
+def parse_yandex_xml(xml_text: str, *, engine: str, query: str, top: int, start_pos: int = 1) -> list[SerpHit]:
     """Парсер единой xmlstock-схемы. Ошибки парсинга -> [] (не роняем пайплайн)."""
     hits: list[SerpHit] = []
     try:
         root = ET.fromstring(xml_text)
-        pos = 1
+        pos = start_pos
         for group in root.iter("group"):
             doc = group.find("doc")
             if doc is None:
@@ -64,27 +64,40 @@ def parse_yandex_xml(xml_text: str, *, engine: str, query: str, top: int) -> lis
                 url=url, domain=_domain_of(url), title=title.strip(), snippet=snippet.strip(),
             ))
             pos += 1
-            if pos > top:
+            if len(hits) >= top:
                 break
     except ET.ParseError as exc:
         logger.warning("SERP XML parse failed (%s): %s", engine, exc)
     return hits
 
 
-async def _fetch_one(client: httpx.AsyncClient, *, engine: str, url: str, query: str,
-                     lr: int, top: int) -> list[SerpHit]:
+async def _fetch_page(client: httpx.AsyncClient, *, engine: str, url: str, query: str,
+                      lr: int, page: int) -> list[SerpHit]:
     s = get_settings()
     params = {"user": s.xmlstock_user, "key": s.xmlstock_key, "query": query, "sortby": "rlv"}
-    if engine == "yandex":
+    if "yandex" in engine:
         params["lr"] = lr
         params["maxpassages"] = 2
+    if page > 0:
+        params["page"] = page
     try:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
-        return parse_yandex_xml(resp.text, engine=engine, query=query, top=top)
+        return parse_yandex_xml(resp.text, engine=engine, query=query, top=10, start_pos=page * 10 + 1)
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("xmlstock %s failed for '%s': %s", engine, query, exc)
+        logger.warning("xmlstock %s page %d failed for '%s': %s", engine, page, query, exc)
         return []
+
+
+async def _fetch_one(client: httpx.AsyncClient, *, engine: str, url: str, query: str,
+                     lr: int, top: int = 20) -> list[SerpHit]:
+    """Сбор выдачи по запросу: 2 страницы (позиции 1-20) параллельно."""
+    num_pages = max(1, (top + 9) // 10)
+    pages = await asyncio.gather(*[
+        _fetch_page(client, engine=engine, url=url, query=query, lr=lr, page=p)
+        for p in range(num_pages)
+    ])
+    return [h for chunk in pages for h in chunk][:top]
 
 
 async def fetch_serp(queries: list[str], *, lr: int, top: int | None = None,
@@ -99,7 +112,7 @@ async def fetch_serp(queries: list[str], *, lr: int, top: int | None = None,
     """
     s = get_settings()
     top = top or s.serp_top
-    sem = asyncio.Semaphore(4)  # не DDoS-им платный API
+    sem = asyncio.Semaphore(6)  # параллельные запросы к XML-шлюзу
     engines = engines or ["yandexlive", "google"]
 
     endpoints = {
