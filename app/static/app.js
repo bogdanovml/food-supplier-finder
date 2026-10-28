@@ -85,6 +85,8 @@ async function init() {
   await loadSearchHistory();
   setupEventListeners();
   buildTable();
+  refreshInboxBadge();
+  setInterval(refreshInboxBadge, 45000);
 }
 
 async function loadRegions() {
@@ -134,6 +136,15 @@ function setupEventListeners() {
   document.getElementById("rfq-regen-btn").addEventListener("click", regenerateRfq);
   document.getElementById("rfq-send-btn").addEventListener("click", dispatchRfqSmtp);
   document.getElementById("rfq-mailto-btn").addEventListener("click", dispatchRfqMailto);
+  document.getElementById("rfq-add-email-btn").addEventListener("click", addRfqManualEmail);
+  document.getElementById("rfq-manual-email").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addRfqManualEmail(); }
+  });
+  document.querySelectorAll('input[name="rfq-mode"]').forEach(radio => {
+    radio.addEventListener("change", updateRfqRecipientsOnly);
+  });
+  document.getElementById("btn-inbox").addEventListener("click", openInboxModal);
+  document.getElementById("inbox-refresh-btn").addEventListener("click", loadInbox);
   document.getElementById("btn-registry").addEventListener("click", openRegistry);
   document.getElementById("tab-results").addEventListener("click", () => switchView("results"));
   document.getElementById("tab-excluded").addEventListener("click", () => switchView("excluded"));
@@ -963,44 +974,69 @@ function openComparisonModal() {
 }
 
 /* --------------------------------------------------------------------------
-   RFQ Modal & Dispatch
+   RFQ (Request For Quotation) & Inbox
    -------------------------------------------------------------------------- */
+let rfqManualEmails = [];
+let inboxMessages = [];
+
 async function openRfqModal() {
-  if (!currentSearchId) {
-    alert("Сначала дождитесь сохранения поисковой сессии.");
-    return;
-  }
-  let selected = getSelectedSuppliers();
+  const selected = getSelectedSuppliers();
   if (!selected.length) {
-    selected = Array.from(suppliersMap.values()).filter(s => s.emails && s.emails.length).slice(0, 5);
-  }
-  if (!selected.length) {
-    alert("Среди найденных поставщиков нет подтвержденных email-адресов.");
+    showToast("Выберите хотя бы одного поставщика для запроса КП");
     return;
   }
 
-  const chipsEl = document.getElementById("rfq-recipients-chips");
-  chipsEl.innerHTML = selected.map(s => `
-    <span class="badge bg-white text-dark border p-2">
-      <strong>${escapeHtml(s.name)}</strong>: ${(s.emails && s.emails.length) ? escapeHtml(s.emails[0]) : "нет email"}
-    </span>
-  `).join("");
-
+  rfqManualEmails = [];
+  document.getElementById("rfq-mode-test").checked = true;
+  document.getElementById("rfq-manual-email").value = "";
   document.getElementById("rfq-send-btn").dataset.ids = JSON.stringify(selected.map(s => s.id));
+  
   new bootstrap.Modal(document.getElementById("rfq-modal")).show();
   await generateRfqDraft(selected.map(s => s.id));
 }
 
-async function regenerateRfq() {
-  const ids = JSON.parse(document.getElementById("rfq-send-btn").dataset.ids || "[]");
-  await generateRfqDraft(ids);
+function addRfqManualEmail() {
+  const input = document.getElementById("rfq-manual-email");
+  const email = (input.value || "").trim().toLowerCase();
+  if (!email || !email.includes("@") || !email.includes(".")) {
+    showToast("Введите корректный email адрес");
+    return;
+  }
+  if (!rfqManualEmails.includes(email)) {
+    rfqManualEmails.push(email);
+  }
+  input.value = "";
+  updateRfqRecipientsOnly();
 }
 
-async function generateRfqDraft(ids) {
+function removeRfqRecipient(emailToRemove) {
+  rfqManualEmails = rfqManualEmails.filter(e => e !== emailToRemove);
+  updateRfqRecipientsOnly();
+}
+
+async function regenerateRfq() {
+  const ids = JSON.parse(document.getElementById("rfq-send-btn").dataset.ids || "[]");
+  await generateRfqDraft(ids, true);
+}
+
+async function updateRfqRecipientsOnly() {
+  const ids = JSON.parse(document.getElementById("rfq-send-btn").dataset.ids || "[]");
+  await generateRfqDraft(ids, false);
+}
+
+async function generateRfqDraft(ids, forceRegenerate = false) {
   const extra = document.getElementById("rfq-extra").value;
-  document.getElementById("rfq-subject").value = "Генерация темы письма...";
-  document.getElementById("rfq-body").value = "Генерация текста делового запроса через ИИ...";
-  document.getElementById("rfq-send-btn").disabled = true;
+  const mode = document.querySelector('input[name="rfq-mode"]:checked')?.value || "test";
+  const curSubject = document.getElementById("rfq-subject").value;
+  const curBody = document.getElementById("rfq-body").value;
+
+  const hasExistingText = !forceRegenerate && curSubject && !curSubject.startsWith("Генерация") && curBody;
+
+  if (!hasExistingText) {
+    document.getElementById("rfq-subject").value = "Генерация темы письма...";
+    document.getElementById("rfq-body").value = "Генерация текста делового запроса через ИИ...";
+    document.getElementById("rfq-send-btn").disabled = true;
+  }
 
   try {
     const res = await fetch(api("/api/rfq/preview"), {
@@ -1009,18 +1045,58 @@ async function generateRfqDraft(ids) {
       body: JSON.stringify({
         search_id: currentSearchId,
         supplier_ids: ids,
-        extra_requirements: extra
+        extra_requirements: extra,
+        mode: mode,
+        manual_emails: rfqManualEmails,
+        subject: hasExistingText ? curSubject : null,
+        body: hasExistingText ? curBody : null
       })
     });
     if (!res.ok) throw new Error("Сбой формирования письма");
     const data = await res.json();
+    
     document.getElementById("rfq-subject").value = data.subject;
     document.getElementById("rfq-body").value = data.body;
     document.getElementById("rfq-send-btn").disabled = false;
     document.getElementById("rfq-send-btn").dataset.recipients = JSON.stringify(data.recipients || []);
+    
+    // Отображение лимита
+    document.getElementById("rfq-daily-counter").textContent =
+      `Лимит: ${data.daily_used} / ${data.daily_limit} писем сегодня`;
+
+    // Отображение списка получателей
+    renderRfqRecipientsChips(data.recipients || [], mode);
   } catch (err) {
-    document.getElementById("rfq-body").value = `Ошибка генерации черновика: ${err.message}`;
+    if (!hasExistingText) {
+      document.getElementById("rfq-body").value = `Ошибка генерации черновика: ${err.message}`;
+    }
   }
+}
+
+function renderRfqRecipientsChips(recipients, mode) {
+  const container = document.getElementById("rfq-recipients-chips");
+  const countEl = document.getElementById("rfq-recipients-count");
+  countEl.textContent = `Всего получателей: ${recipients.length}`;
+
+  if (!recipients.length) {
+    container.innerHTML = '<span class="text-muted small">Нет получателей. Добавьте email вручную ниже.</span>';
+    return;
+  }
+
+  container.innerHTML = recipients.map(r => {
+    const isManual = rfqManualEmails.includes(r.email);
+    const badgeColor = mode === "test" ? "bg-info text-dark" : (isManual ? "bg-secondary" : "bg-primary");
+    const badgeLabel = mode === "test" ? "Тестовый ящик" : (isManual ? "Ручной ввод" : "Поставщик");
+    const removeBtn = isManual ? `<button type="button" class="btn-close btn-close-white ms-2" style="font-size: 8px;" onclick="removeRfqRecipient('${r.email}')"></button>` : "";
+    return `
+      <span class="badge bg-white text-dark border p-2 d-inline-flex align-items-center gap-2">
+        <span class="badge ${badgeColor}">${badgeLabel}</span>
+        <strong>${escapeHtml(r.name)}</strong>:
+        <span class="font-monospace">${escapeHtml(r.email)}</span>
+        ${removeBtn}
+      </span>
+    `;
+  }).join("");
 }
 
 async function dispatchRfqSmtp() {
@@ -1029,10 +1105,11 @@ async function dispatchRfqSmtp() {
   const subject = document.getElementById("rfq-subject").value;
   const body = document.getElementById("rfq-body").value;
   const extra = document.getElementById("rfq-extra").value;
+  const mode = document.querySelector('input[name="rfq-mode"]:checked')?.value || "test";
 
   btn.disabled = true;
   btn.textContent = "Отправка...";
-  document.getElementById("rfq-dispatch-status").textContent = "Установка защищенного SMTP-соединения...";
+  document.getElementById("rfq-dispatch-status").textContent = "Отправка индивидуальных писем через SMTP...";
 
   try {
     const res = await fetch(api("/api/rfq/send"), {
@@ -1043,14 +1120,17 @@ async function dispatchRfqSmtp() {
         supplier_ids: ids,
         extra_requirements: extra,
         subject,
-        body
+        body,
+        mode: mode,
+        manual_emails: rfqManualEmails
       })
     });
     const result = await res.json();
     if (!res.ok) throw new Error(result.detail || "Сбой отправки");
     
-    document.getElementById("rfq-dispatch-status").textContent = `Успешно отправлено: ${result.sent}, сбоев: ${result.failed}`;
-    showToast(`Запрос отправлен ${result.sent} адресатам`);
+    document.getElementById("rfq-dispatch-status").textContent =
+      `Успешно отправлено: ${result.sent}, ошибок: ${result.failed} (Лимит: ${result.daily_used}/${result.daily_limit})`;
+    showToast(`Запрос отправлен ${result.sent} адресатам (${mode === "test" ? "тестовый режим" : "боевой режим"})`);
     
     // Update local statuses
     ids.forEach(id => {
@@ -1058,9 +1138,17 @@ async function dispatchRfqSmtp() {
       if (sup) sup.status = "rfq_sent";
     });
     updateTableData();
+
+    // Если тест — через несколько секунд автоответчики пришлют КП
+    if (mode === "test") {
+      setTimeout(() => {
+        refreshInboxBadge();
+        showToast("Получены автоответы от тестовых поставщиков! Проверьте вкладку «Ответы поставщиков»");
+      }, 4000);
+    }
   } catch (err) {
     document.getElementById("rfq-dispatch-status").textContent = `Ошибка: ${err.message}`;
-    alert(`Не удалось отправить через SMTP: ${err.message}. Воспользуйтесь кнопкой "Открыть в почтовой программе".`);
+    alert(`Ошибка отправки: ${err.message}`);
   } finally {
     btn.disabled = false;
     btn.textContent = "Отправить через SMTP";
@@ -1068,11 +1156,114 @@ async function dispatchRfqSmtp() {
 }
 
 function dispatchRfqMailto() {
-  const recipients = JSON.parse(document.getElementById("rfq-send-btn").dataset.recipients || "[]");
+  const recipientsObj = JSON.parse(document.getElementById("rfq-send-btn").dataset.recipients || "[]");
+  const emails = recipientsObj.map(r => r.email).filter(Boolean);
   const subject = encodeURIComponent(document.getElementById("rfq-subject").value);
   const body = encodeURIComponent(document.getElementById("rfq-body").value);
-  const to = recipients.join(",");
+  const to = emails.join(",");
   window.open(`mailto:${to}?subject=${subject}&body=${body}`, "_blank");
+}
+
+/* --------------------------------------------------------------------------
+   Входящие ответы поставщиков (Inbox)
+   -------------------------------------------------------------------------- */
+async function openInboxModal() {
+  new bootstrap.Modal(document.getElementById("inbox-modal")).show();
+  await loadInbox();
+}
+
+async function loadInbox() {
+  const spinner = document.getElementById("inbox-spinner");
+  spinner.classList.remove("d-none");
+  const listEl = document.getElementById("inbox-list");
+
+  try {
+    const res = await fetch(api("/api/rfq/inbox"));
+    const data = await res.json();
+    inboxMessages = data.messages || [];
+    renderInboxList(inboxMessages);
+    updateInboxBadge(data.unread_count || 0);
+  } catch (err) {
+    listEl.innerHTML = `<div class="p-4 text-center text-danger small">Не удалось загрузить почту: ${err.message}</div>`;
+  } finally {
+    spinner.classList.add("d-none");
+  }
+}
+
+function renderInboxList(messages) {
+  const listEl = document.getElementById("inbox-list");
+  if (!messages.length) {
+    listEl.innerHTML = '<div class="p-4 text-center text-muted small">Входящих ответов пока нет.<br>Отправьте тестовый RFQ-запрос для демонстрации автоответов.</div>';
+    return;
+  }
+
+  listEl.innerHTML = messages.map((m, idx) => {
+    const isUnread = !m.is_read;
+    const dateStr = (m.received_at || "").slice(0, 22);
+    return `
+      <a href="#" class="list-group-item list-group-item-action p-3 inbox-item ${isUnread ? 'fw-bold bg-light' : ''}" data-idx="${idx}">
+        <div class="d-flex w-100 justify-content-between align-items-center mb-1">
+          <span class="text-truncate" style="max-width: 220px;">${escapeHtml(m.from_name || m.from_email)}</span>
+          <small class="text-muted" style="font-size: 11px;">${escapeHtml(dateStr)}</small>
+        </div>
+        <div class="small text-truncate mb-1 text-dark">${escapeHtml(m.subject || "Без темы")}</div>
+        <div class="text-muted small text-truncate" style="font-size: 12px;">${escapeHtml(m.body || "")}</div>
+      </a>
+    `;
+  }).join("");
+
+  listEl.querySelectorAll(".inbox-item").forEach(item => {
+    item.addEventListener("click", (e) => {
+      e.preventDefault();
+      listEl.querySelectorAll(".inbox-item").forEach(el => el.classList.remove("active"));
+      item.classList.add("active");
+      const idx = parseInt(item.dataset.idx, 10);
+      viewInboxMessage(inboxMessages[idx], item);
+    });
+  });
+}
+
+async function viewInboxMessage(msg, itemEl) {
+  if (!msg) return;
+  document.getElementById("inbox-detail-empty").classList.add("d-none");
+  document.getElementById("inbox-detail-view").classList.remove("d-none");
+
+  document.getElementById("inbox-view-subject").textContent = msg.subject;
+  document.getElementById("inbox-view-from").textContent = `${msg.from_name} <${msg.from_email}>`;
+  document.getElementById("inbox-view-date").textContent = msg.received_at || "";
+  document.getElementById("inbox-view-body").textContent = msg.body;
+
+  // Отмечаем прочитанным
+  if (!msg.is_read) {
+    msg.is_read = 1;
+    if (itemEl) itemEl.classList.remove("fw-bold", "bg-light");
+    try {
+      await fetch(api(`/api/rfq/inbox/${encodeURIComponent(msg.id)}/read`), { method: "POST" });
+      refreshInboxBadge();
+    } catch {}
+  }
+}
+
+async function refreshInboxBadge() {
+  try {
+    const res = await fetch(api("/api/rfq/stats"));
+    if (res.ok) {
+      const data = await res.json();
+      updateInboxBadge(data.unread_count || 0);
+    }
+  } catch {}
+}
+
+function updateInboxBadge(unreadCount) {
+  const badge = document.getElementById("inbox-unread-badge");
+  if (badge) {
+    if (unreadCount > 0) {
+      badge.textContent = unreadCount;
+      badge.classList.remove("d-none");
+    } else {
+      badge.classList.add("d-none");
+    }
+  }
 }
 
 /* --------------------------------------------------------------------------

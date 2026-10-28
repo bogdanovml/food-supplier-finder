@@ -116,6 +116,20 @@ CREATE TABLE IF NOT EXISTS rfq_log (
     detail TEXT,
     sent_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rfq_daily_counter (
+    day TEXT PRIMARY KEY,
+    count INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS rfq_inbox (
+    id TEXT PRIMARY KEY,
+    from_email TEXT,
+    from_name TEXT,
+    to_email TEXT,
+    subject TEXT,
+    body TEXT,
+    received_at TEXT,
+    is_read INTEGER DEFAULT 0
+);
 """
 
 
@@ -310,6 +324,70 @@ def log_rfq(search_id: int, supplier_ids: list[int], subject: str, body: str, st
         )
         c.commit()
         return cur.lastrowid
+
+
+def get_daily_rfq_count(day: str | None = None) -> int:
+    if not day:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with db() as c:
+        row = c.execute("SELECT count FROM rfq_daily_counter WHERE day=?", (day,)).fetchone()
+        return row[0] if row else 0
+
+
+def increment_daily_rfq_count(count: int, day: str | None = None) -> int:
+    if not day:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with db() as c:
+        c.execute(
+            "INSERT INTO rfq_daily_counter (day, count) VALUES (?, ?) "
+            "ON CONFLICT(day) DO UPDATE SET count = count + ?",
+            (day, count, count)
+        )
+        c.commit()
+        return get_daily_rfq_count(day)
+
+
+def save_inbox_message(msg: dict) -> bool:
+    with db() as c:
+        try:
+            c.execute(
+                "INSERT OR IGNORE INTO rfq_inbox (id, from_email, from_name, to_email, subject, body, received_at, is_read) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    msg["id"],
+                    msg.get("from_email", ""),
+                    msg.get("from_name", ""),
+                    msg.get("to_email", ""),
+                    msg.get("subject", ""),
+                    msg.get("body", ""),
+                    msg.get("received_at", _now()),
+                    msg.get("is_read", 0),
+                )
+            )
+            c.commit()
+            return True
+        except Exception:
+            return False
+
+
+def get_inbox_messages(limit: int = 50) -> list[dict]:
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM rfq_inbox ORDER BY received_at DESC, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_inbox_read(msg_id: str) -> None:
+    with db() as c:
+        c.execute("UPDATE rfq_inbox SET is_read = 1 WHERE id = ?", (msg_id,))
+        c.commit()
+
+
+def get_inbox_unread_count() -> int:
+    with db() as c:
+        row = c.execute("SELECT COUNT(*) FROM rfq_inbox WHERE is_read = 0").fetchone()
+        return row[0] if row else 0
 
 
 # ------------------------------ реестр поставщиков (глобальная база) ------------------------------

@@ -37,12 +37,22 @@ class Settings(BaseSettings):
     dadata_api_key: str = ""
     dadata_secret: str = ""
 
-    # SMTP (RFQ-рассылка)
+    # SMTP (RFQ-рассылка) и IMAP (прием ответов)
     smtp_host: str = ""
-    smtp_port: int = 587
+    smtp_port: int = 465
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_from: str = ""
+    smtp_daily_limit: int = 50
+
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_user: str = ""
+    imap_password: str = ""
+
+    test_supplier_1_pass: str = ""
+    test_supplier_2_pass: str = ""
+    test_supplier_3_pass: str = ""
 
     # Приложение
     app_port: int = 8000

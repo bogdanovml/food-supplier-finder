@@ -56,6 +56,8 @@ class RFQIn(BaseModel):
     extra_requirements: str = ""
     subject: str | None = None
     body: str | None = None
+    mode: str = "test"  # "test" | "combat"
+    manual_emails: list[str] = []
 
 
 # ------------------------------ SSE поиск ------------------------------
@@ -169,20 +171,55 @@ async def api_rfq_preview(body: RFQIn):
         raise HTTPException(404, "поиск не найден")
     suppliers = [db.get_supplier(sid) for sid in body.supplier_ids]
     suppliers = [s for s in suppliers if s]
-    if not suppliers:
-        raise HTTPException(400, "нет поставщиков")
-    try:
-        subject, text = await rfq_mod.draft_letter(search["query"], search["region"],
-                                                    suppliers, body.extra_requirements)
-    except LLMError as exc:
-        raise HTTPException(502, f"LLM недоступен: {exc}")
-    return {"subject": subject, "body": text,
-            "recipients": [e for s in suppliers for e in s["emails"]]}
+
+    # Если текст письма уже есть и не является плейсхолдером — сохраняем правки пользователя
+    if body.subject and body.body and not body.subject.startswith("Генерация"):
+        subject, text = body.subject, body.body
+    else:
+        try:
+            subject, text = await rfq_mod.draft_letter(search["query"], search["region"],
+                                                        suppliers, body.extra_requirements)
+        except LLMError as exc:
+            raise HTTPException(502, f"LLM недоступен: {exc}")
+
+    if body.mode == "test":
+        recipients = [
+            {"email": acc["email"], "name": acc["name"], "role": "Тестовый поставщик"}
+            for acc in rfq_mod.get_test_suppliers()
+        ]
+    else:
+        recipients = []
+        seen = set()
+        for s in suppliers:
+            sup_name = s.get("legal_name") or s.get("name") or "Поставщик"
+            for em in (s.get("emails") or []):
+                val_e = rfq_mod._clean_email(em)
+                if val_e and val_e not in seen:
+                    seen.add(val_e)
+                    recipients.append({"email": val_e, "name": sup_name, "role": "Поставщик из выдачи"})
+        for em in body.manual_emails:
+            val_e = rfq_mod._clean_email(em)
+            if val_e and val_e not in seen:
+                seen.add(val_e)
+                recipients.append({"email": val_e, "name": "Ручной ввод", "role": "Вручную добавленный email"})
+
+    now_day = db._now()[:10]
+    daily_used = db.get_daily_rfq_count(now_day)
+    s = get_settings()
+
+    return {
+        "subject": subject,
+        "body": text,
+        "mode": body.mode,
+        "recipients": recipients,
+        "daily_used": daily_used,
+        "daily_limit": s.smtp_daily_limit,
+    }
 
 
 @app.post("/api/rfq/send")
 async def api_rfq_send(body: RFQIn):
-    """Генерация + отправка RFQ всем поставщикам с email. SMTP-конфиг в .env."""
+    """Генерация + отправка RFQ. Индивидуальные письма, лимит 50/сутки."""
     s = get_settings()
     if not s.smtp_configured:
         raise HTTPException(400, "SMTP не настроен: заполните SMTP_* в .env")
@@ -195,12 +232,48 @@ async def api_rfq_send(body: RFQIn):
         result = await rfq_mod.send_letter(
             search, suppliers, body.extra_requirements,
             custom_subject=body.subject, custom_body=body.body,
+            mode=body.mode, manual_emails=body.manual_emails
         )
         for sup in suppliers:
             db.update_supplier_status(sup["id"], "rfq_sent")
+        return result
+    except ValueError as ve:
+        raise HTTPException(429, str(ve))
     except LLMError as exc:
         raise HTTPException(502, f"LLM недоступен: {exc}")
-    return result
+    except Exception as exc:
+        raise HTTPException(500, f"Ошибка отправки: {exc}")
+
+
+@app.get("/api/rfq/inbox")
+async def api_rfq_inbox():
+    """Получение входящих ответов от поставщиков (синхронизация IMAP)."""
+    messages = await asyncio.to_thread(rfq_mod.sync_inbox_from_imap)
+    now_day = db._now()[:10]
+    return {
+        "messages": messages,
+        "unread_count": db.get_inbox_unread_count(),
+        "daily_used": db.get_daily_rfq_count(now_day),
+        "daily_limit": get_settings().smtp_daily_limit,
+    }
+
+
+@app.post("/api/rfq/inbox/{msg_id}/read")
+async def api_rfq_inbox_read(msg_id: str):
+    """Пометить сообщение прочитанным."""
+    db.mark_inbox_read(msg_id)
+    return {"status": "ok"}
+
+
+@app.get("/api/rfq/stats")
+async def api_rfq_stats():
+    """Текущая статистика рассылки и входящих ответов."""
+    now_day = db._now()[:10]
+    return {
+        "unread_count": db.get_inbox_unread_count(),
+        "daily_used": db.get_daily_rfq_count(now_day),
+        "daily_limit": get_settings().smtp_daily_limit,
+    }
 
 
 # ------------------------------ экспорт ------------------------------
