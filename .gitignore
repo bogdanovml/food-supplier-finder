@@ -18,6 +18,9 @@ data/*.sqlite*
 exports/
 *.log
 
+# Internal docs / notes
+docs/
+
 # OS / editor
 .DS_Store
 ._*
