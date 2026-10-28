@@ -74,9 +74,15 @@ async def _plan_queries(query: str, region_name: str, emit: Emit) -> tuple[list[
     except LLMError:
         pass
     queries = queries or [f"{query} оптом", f"{query} производитель купить"]
-    # страховка: хотя бы один запрос обязан содержать регион
+    # Страховка баланса:
+    # 1. Хотя бы один запрос ОБЯЗАН содержать регион (для местных производителей/баз)
     if not any(region_name.split()[0].lower() in q.lower() for q in queries):
         queries.append(f"{query} оптовый поставщик {region_name}")
+    # 2. Хотя бы один запрос ОБЯЗАН быть общероссийским B2B (производитель/заготовитель/дистрибьютор),
+    # иначе по специфичным товарам (дикоросы, черемша, импорт) в регионах без местных теплиц находится 0!
+    if not any(region_name.split()[0].lower() not in q.lower() for q in queries):
+        queries.append(f"{query} оптом от производителя купить")
+    queries = queries[:4]
 
     codes = validate_codes(codes_raw)
     for c, _n in suggest_codes(query, limit=2):
@@ -1026,23 +1032,33 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         # московская лавка с МКАД-доставкой в Тулу не возит
         # (кейсы АЗБУКА, kedr-nuts, mukomoloff в тульской выдаче)
         _FEDERAL_DELIVERY = _re.compile(
-            r"по всей россии|по россии\b|в любой (город|регион)|любой регион"
+            r"по всей россии|по россии\b|вся россия|вся рф|по рф\b|в любой (город|регион)|любой регион"
             r"|все регионы|во все города|все города россии|россии и снг"
-            r"|по снг\b|территори\w+ россии", _re.I)
+            r"|по снг\b|территори\w+ россии|доставка (любой|любыми) тк"
+            r"|отправка в регионы|отгрузка по рф|доставка по рф", _re.I)
 
         def _delivers_here(c) -> bool:
-            # федеральность читаем ТОЛЬКО со страниц доставки/условий сайта:
-            # SERP-сниппет («Доставка по всей России! Заходите!») — реклама,
-            # не условия (кейс agroopt-market в тульской выдаче)
-            blob = f"{c.delivery or ''} {c.order_terms or ''}"
+            # 1. Структурированная география от LLM (delivery_geo):
+            dg = (c.delivery_geo or "").lower()
+            if any(w in dg for w in ("рф", "росси", "снг", "все регионы", "любой регион")):
+                return True
+
+            # 2. Текст условий доставки:
+            blob = f"{c.delivery or ''} {c.order_terms or ''}".lower()
             if _FEDERAL_DELIVERY.search(blob):
                 return True
-            low = blob.lower()
+
+            # 3. Доставка транспортными компаниями (ТК / Деловые линии / СДЭК):
+            if any(w in blob for w in ("транспортн", " деловые линии", " сдэк", " пэк", "почта россии")):
+                if not _re.search(r"только по (москве|спб)\b|доставка исключительно", blob):
+                    return True
+
+            # 4. Совпадение ключевых слов целевого региона:
             kws = set()
             for grp in (CITY_REGION_ALIASES.get(region_name),
                         REGION_KEYWORDS.get(region_name)):
                 kws |= set(grp or [])
-            return any(k in low for k in kws if k)
+            return any(k in blob for k in kws if k)
 
         kept_geo = []
         for c in cards:
