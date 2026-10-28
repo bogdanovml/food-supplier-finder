@@ -191,12 +191,6 @@ def regex_facts(url: str, text: str) -> SiteFacts:
         f.min_order = re.sub(r"\s+", " ", m.group(0))[:80]
     f.certificates = sorted(set(x.strip().upper() if len(x) < 12 else x.strip()
                                 for x in RE_CERT.findall(text)))[:4]
-    m = RE_DELIVERY.search(text)
-    if m:
-        candidate = re.sub(r"\s+", " ", m.group(1))[:140]
-        nav_keywords = ("прайс-лист", "акции", "корзина", "личный кабинет", "каталог", "контакты", "главная")
-        if not any(kw in candidate.lower() for kw in nav_keywords):
-            f.delivery = candidate
     markers = []
     for m in RE_ORDER_TERMS.finditer(text):
         val = m.group(1).strip().lower()
@@ -229,14 +223,26 @@ _LINK_RULES: list[tuple[str, re.Pattern]] = [
     # строго: «Компания» без «О» — слишком общий якорь, маскирует дефицит
     # и не пускает карту сайта со страницей /requisites/ (кейс abri-kos.ru)
     ("legal", re.compile(r"реквизит|о[- ]компани|о[- _]компан|about|rekv|requisites|документы|documents", re.I)),
-    ("delivery", re.compile(r"достав|оплата|условия|dostavka|oplata|shipping|самовывоз", re.I)),
+    ("delivery", re.compile(r"достав|оплата|условия|dostavka|delivery|oplata|shipping|самовывоз", re.I)),
 ]
 _NAV_NOISE = re.compile(r"войти|регистр|корзин|личн|политик|cookie|ваканс", re.I)
 
 
+def _normalize_host(h: str) -> str:
+    """Нормализует хост с учетом Punycode/IDN для кириллических .рф доменов.
+    Без этого ссылки на дарысибири.рф (xn--80achrba6cdf3h.xn--p1ai) отбрасываются!"""
+    if not h:
+        return ""
+    h = h.strip().lower().removeprefix("www.")
+    try:
+        return h.encode("idna").decode("ascii")
+    except Exception:
+        return h
+
+
 def extract_site_links(html: str, base_url: str, limit: int = 100) -> list[tuple[str, str]]:
     """Все внутренние ссылки с текстами якорей: [(abs_url, anchor), ...]."""
-    base_host = _up(base_url).netloc.removeprefix("www.")
+    base_host = _normalize_host(_up(base_url).netloc)
     out, seen = [], set()
     for m in re.finditer(r'<a[^>]+href="([^"#]+)"[^>]*>(.*?)</a>',
                          html, re.I | re.S):
@@ -244,7 +250,7 @@ def extract_site_links(html: str, base_url: str, limit: int = 100) -> list[tuple
         if href.startswith(("mailto:", "tel:", "javascript:", "data:")):
             continue
         absu = _uj(base_url, href)
-        host = _up(absu).netloc.removeprefix("www.")
+        host = _normalize_host(_up(absu).netloc)
         if host != base_host:
             continue
         if absu.rstrip("/") == base_url.rstrip("/") or absu in seen:
@@ -380,13 +386,68 @@ async def sitemap_pages(base_url: str) -> dict[str, list[str]]:
         return out
 
 
+TARGET_PATTERNS: dict[str, re.Pattern] = {
+    "delivery": re.compile(
+        r'<a[^>]+href="([^"#]+)"[^>]*>(?:<[^>]+>)*\s*([^<]*(?:доставк|оплат|услови|delivery|shipping)[^<]*)\s*(?:</[^>]+>)*</a>',
+        re.I,
+    ),
+    "contacts": re.compile(
+        r'<a[^>]+href="([^"#]+)"[^>]*>(?:<[^>]+>)*\s*([^<]*(?:контакт|связ|адрес|contact)[^<]*)\s*(?:</[^>]+>)*</a>',
+        re.I,
+    ),
+    "legal": re.compile(
+        r'<a[^>]+href="([^"#]+)"[^>]*>(?:<[^>]+>)*\s*([^<]*(?:реквизит|о[- ]компани|о нас|документ|requisite|about)[^<]*)\s*(?:</[^>]+>)*</a>',
+        re.I,
+    ),
+    "prices": re.compile(
+        r'<a[^>]+href="([^"#]+)"[^>]*>(?:<[^>]+>)*\s*([^<]*(?:прайс|цен[ыа]|каталог|price|catalog)[^<]*)\s*(?:</[^>]+>)*</a>',
+        re.I,
+    ),
+}
+
+
+def scan_target_links(html: str, base_url: str) -> dict[str, list[str]]:
+    """Прямой целевой поиск ключевых ссылок (меню, футер, навигация) по всему HTML.
+    Не зависит от лимитов длины списков ссылок и находит /delivery/, /contacts/, /requisites/
+    даже на страницах каталогов на 500 КБ."""
+    from urllib.parse import urlparse, urljoin
+    base_host = _normalize_host(urlparse(base_url).netloc)
+    out: dict[str, list[str]] = {k: [] for k in TARGET_PATTERNS}
+    for cat, rx in TARGET_PATTERNS.items():
+        seen = set()
+        for m in rx.finditer(html):
+            href = m.group(1).strip()
+            if href.startswith(("mailto:", "tel:", "javascript:", "data:")):
+                continue
+            absu = urljoin(base_url, href)
+            host = _normalize_host(urlparse(absu).netloc)
+            if host != base_host or absu.rstrip("/") == base_url.rstrip("/"):
+                continue
+            if absu not in seen:
+                seen.add(absu)
+                out[cat].append(absu)
+            if len(out[cat]) >= 3:
+                break
+    return out
+
+
 async def classify_site_links(html: str, base_url: str) -> dict[str, list[str]]:
-    """Словарь -> карта сайта -> LLM на дефицит: сначала бесплатно; потом
-    sitemap.xml (жирные каталоги прячут «Реквизиты» за сотнями товарных
-    ссылок); недостающее — вычиткой якорей LLM."""
-    links = extract_site_links(html, base_url)
-    cats = classify_links_regex(links)
+    """Каскад поиска целевых страниц компании:
+    1. Прямой целевой скан HTML по меню, навигации и футеру (мгновенно);
+    2. Извлечение ссылок страницы + словарная классификация;
+    3. sitemap.xml / robots.txt для жирных каталогов;
+    4. LLM-классификация оставшихся ссылок при дефиците.
+    """
+    cats = scan_target_links(html, base_url)
     deficit = [c for c in ("prices", "contacts", "legal", "delivery") if not cats[c]]
+    links = []
+    if deficit:
+        links = extract_site_links(html, base_url)
+        regex_cats = classify_links_regex(links)
+        for c in deficit:
+            if regex_cats.get(c):
+                cats[c] = regex_cats[c]
+        deficit = [c for c in deficit if not cats[c]]
     if deficit:
         sm = await sitemap_pages(base_url)
         for c in deficit:
@@ -407,7 +468,7 @@ def extract_product_links(html: str, query: str, base_url: str, limit: int = 2) 
     «прайс|каталог|цена|katalog|price» в href/анкоре. Абсолютные URL,
     только внутренние (тот же домен)."""
     from urllib.parse import urljoin, urlparse
-    base_host = urlparse(base_url).netloc.removeprefix("www.")
+    base_host = _normalize_host(urlparse(base_url).netloc)
     tokens = [t for t in re.split(r"\W+", query.lower()) if len(t) > 2]
     scored: list[tuple[float, str]] = []
     for m in re.finditer(r'<a[^>]+href="([^"#]+)"[^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL):
@@ -415,7 +476,7 @@ def extract_product_links(html: str, query: str, base_url: str, limit: int = 2) 
         if href.startswith(("mailto:", "tel:", "javascript:", "http")):
             continue
         absu = urljoin(base_url, href)
-        host = urlparse(absu).netloc.removeprefix("www.")
+        host = _normalize_host(urlparse(absu).netloc)
         if host != base_host or absu.rstrip("/") == base_url.rstrip("/"):
             continue
         anchor = re.sub(r"<[^>]+>", " ", anchor_html)
@@ -802,22 +863,23 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     async def _delivery_page():
         if not use_llm:
             return None
-        # классификатор молчит -> типовая проба /dostavka/ (самый частый путь;
-        # кейс fruitsparadise.ru: мега-меню за лимитом ссылок, sitemap-страницы
-        # не прочитаны — а зона доставки «Москва МКАД+5» лежит именно там)
-        durl = link_cats["delivery"][0] if link_cats["delivery"] \
-            else f"{_up(url).scheme or 'https'}://{_up(url).netloc}/dostavka/"
-        try:
-            dtext = _text_of(await fetch_html(durl) or "")
-            if len(dtext) < 150 and not link_cats["delivery"]:
-                return (None, None, None, None)  # проба мимо — не выдумываем
-            df = regex_facts(url, dtext)
-            summary, dcity, dgeo = None, None, None
-            if dtext:
+        # Адресные страницы доставки из классификатора ссылок или типовые пути
+        candidates = list(link_cats.get("delivery") or [])
+        if not candidates:
+            root = f"{_up(url).scheme or 'https'}://{_up(url).netloc}"
+            candidates = [f"{root}/delivery/", f"{root}/dostavka/", f"{root}/dostavka-i-oplata/"]
+        for durl in candidates[:3]:
+            try:
+                dtext = _text_of(await fetch_html(durl) or "")
+                if len(dtext) < 120:
+                    continue
+                df = regex_facts(url, dtext)
                 summary, dcity, dgeo = await llm_delivery(url, dtext)
-            return (df, summary, dcity, dgeo)
-        except Exception:
-            return (None, None, None, None)
+                if summary or dcity or dgeo:
+                    return (df, summary, dcity, dgeo)
+            except Exception:
+                continue
+        return (None, None, None, None)
 
     async def _root_legal():
         # SERP ведёт на глубокую страницу (/zelen/ukrop.html), а юрлицо
@@ -907,8 +969,6 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     if delivery_page:
         df, summary, dcity, dgeo = delivery_page
         if df:
-            if df.delivery and not facts.delivery:
-                facts.delivery = df.delivery
             if df.order_terms and not facts.order_terms:
                 facts.order_terms = df.order_terms
             if df.min_order and not facts.min_order:
@@ -916,7 +976,7 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
         if summary:
             facts.delivery = summary
             facts.ok = True
-        if dgeo and not facts.delivery_geo:
+        if dgeo:
             facts.delivery_geo = dgeo
         if dcity:
             facts.city = dcity
