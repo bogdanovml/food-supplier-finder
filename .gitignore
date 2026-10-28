@@ -8,6 +8,9 @@ venv/
 # Secrets — НИКОГДА в репозиторий
 .env
 *.local.env
+proxies.txt
+*.proxies
+*.proxy
 
 # Data
 data/*.db
