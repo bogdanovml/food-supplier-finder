@@ -3,6 +3,9 @@
    ========================================================================== */
 "use strict";
 
+const BASE_PATH = window.location.pathname.replace(/\/+$/, "");
+const api = (path) => `${BASE_PATH}${path}`;
+
 const STAGES_CONFIG = {
   plan:      { num: "01", name: "План запросов", note: "Запросы + ОКПД2 + ОКВЭД для ЕГРЮЛ" },
   serp:      { num: "02", name: "Поисковые системы", note: "Яндекс и Google XML по региону" },
@@ -86,7 +89,7 @@ async function init() {
 
 async function loadRegions() {
   try {
-    const res = await fetch("/api/regions");
+    const res = await fetch(api("/api/regions"));
     const regions = await res.json();
     const sel = document.getElementById("region");
     sel.innerHTML = "";
@@ -99,7 +102,7 @@ async function loadRegions() {
 
 async function loadSearchHistory() {
   try {
-    const res = await fetch("/api/searches");
+    const res = await fetch(api("/api/searches"));
     const list = await res.json();
     const menu = document.getElementById("history-menu");
     if (!list.length) {
@@ -179,7 +182,7 @@ async function onStartSearch(e) {
   updateSelectionState();
 
   try {
-    const response = await fetch("/api/search", {
+    const response = await fetch(api("/api/search"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, region }),
@@ -311,7 +314,7 @@ async function handleDoneEvent(payload) {
   updateStageStatus("done", "done", null, payload.count);
   // финальная выдача: только прошедшие проверки (юрлицо + контакты + гео)
   try {
-    const res = await fetch(`/api/searches/${payload.search_id}/suppliers`);
+    const res = await fetch(api(`/api/searches/${payload.search_id}/suppliers`));
     if (res.ok) {
       const finalList = await res.json();
       suppliersMap.clear();
@@ -635,7 +638,7 @@ async function openDossier(row) {
   }
   if (row.id && typeof row.id === "number") {
     try {
-      const res = await fetch(`/api/suppliers/${row.id}`);
+      const res = await fetch(api(`/api/suppliers/${row.id}`));
       if (res.ok) supplier = await res.json();
     } catch {}
   }
@@ -858,7 +861,7 @@ async function openDossier(row) {
     if (!text || !supplier.id) return;
     
     try {
-      const res = await fetch(`/api/suppliers/${supplier.id}/notes`, {
+      const res = await fetch(api(`/api/suppliers/${supplier.id}/notes`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text })
@@ -894,7 +897,7 @@ async function cycleSupplierStatus(supplier) {
 
 async function updateSupplierStatus(id, status) {
   try {
-    await fetch(`/api/suppliers/${id}/status`, {
+    await fetch(api(`/api/suppliers/${id}/status`), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status })
@@ -1000,7 +1003,7 @@ async function generateRfqDraft(ids) {
   document.getElementById("rfq-send-btn").disabled = true;
 
   try {
-    const res = await fetch("/api/rfq/preview", {
+    const res = await fetch(api("/api/rfq/preview"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1032,7 +1035,7 @@ async function dispatchRfqSmtp() {
   document.getElementById("rfq-dispatch-status").textContent = "Установка защищенного SMTP-соединения...";
 
   try {
-    const res = await fetch("/api/rfq/send", {
+    const res = await fetch(api("/api/rfq/send"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1080,15 +1083,15 @@ function exportCurrentSearch(type) {
     alert("Сначала выполните поиск или выберите сессию из истории.");
     return;
   }
-  window.location.href = `/api/searches/${currentSearchId}/export/${type}`;
+  window.location.href = api(`/api/searches/${currentSearchId}/export/${type}`);
 }
 
 window.restoreSearch = async function (e, searchId) {
   e.preventDefault();
   try {
     const [searchesRes, suppliersRes] = await Promise.all([
-      fetch("/api/searches"),
-      fetch(`/api/searches/${searchId}/suppliers`)
+      fetch(api("/api/searches")),
+      fetch(api(`/api/searches/${searchId}/suppliers`))
     ]);
     const searches = await searchesRes.json();
     const suppliers = await suppliersRes.json();
@@ -1155,7 +1158,7 @@ let registryTable = null;
 
 async function openRegistry() {
   try {
-    const res = await fetch("/api/registry");
+    const res = await fetch(api("/api/registry"));
     const data = await res.json();
     document.getElementById("registry-stats").innerHTML = `
       <div class="d-flex gap-3 mb-2 small text-muted">
@@ -1224,7 +1227,7 @@ async function switchView(view) {
 
   if (view === "other-regions") {
     if (!currentSearchId) return;
-    const res = await fetch(`/api/searches/${currentSearchId}/excluded`);
+    const res = await fetch(api(`/api/searches/${currentSearchId}/excluded`));
     const excluded = await res.json();
     const geoOnly = excluded.filter(e => e.reason === "geo");
     if (!resultsColumnsBackup) {
@@ -1247,7 +1250,7 @@ async function switchView(view) {
   }
   if (view === "excluded") {
     if (!currentSearchId) return;
-    const res = await fetch(`/api/searches/${currentSearchId}/excluded`);
+    const res = await fetch(api(`/api/searches/${currentSearchId}/excluded`));
     const excluded = await res.json();
     // бэкап колонок и подмена на «причинные»
     if (!resultsColumnsBackup) {
