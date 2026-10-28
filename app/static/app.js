@@ -453,7 +453,11 @@ function buildTable() {
             : kind.includes("дистрибьютер") || kind.includes("дистрибьютор")
               ? '<span class="text-muted ms-1" style="font-size:10px;font-weight:400">(дистриб.)</span>'
               : "";
-          return `<div class="fw-semibold text-dark text-truncate" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}${kindTag}</div>`;
+          const checkoUrl = d.checko_url || (d.inn ? `https://checko.ru/search?query=${d.inn}` : (d.ogrn ? `https://checko.ru/search?query=${d.ogrn}` : null));
+          const checkoBadge = checkoUrl
+            ? `<div class="mt-1"><a href="${escapeHtml(checkoUrl)}" target="_blank" onclick="event.stopPropagation()" class="text-primary text-decoration-none small" style="font-size:11px;" title="Карточка компании в ЕГРЮЛ на checko.ru">Чеко: ${escapeHtml(d.inn || d.ogrn)} ↗</a></div>`
+            : "";
+          return `<div class="fw-semibold text-dark text-truncate" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}${kindTag}</div>${checkoBadge}`;
         }
       },
       {
@@ -537,6 +541,10 @@ function buildTable() {
         formatter: (cell) => {
           const d = cell.getData();
           const bits = [];
+          const checkoUrl = d.checko_url || (d.inn ? `https://checko.ru/search?query=${d.inn}` : (d.ogrn ? `https://checko.ru/search?query=${d.ogrn}` : null));
+          if (checkoUrl) {
+            bits.push(`<a href="${escapeHtml(checkoUrl)}" target="_blank" onclick="event.stopPropagation()" class="trust-chip trust-checko text-decoration-none" title="Проверить юрлицо в ЕГРЮЛ на checko.ru">Чеко ↗</a>`);
+          }
           if (d.gov_contracts_count) {
             bits.push(`<span class="trust-chip trust-gov" title="Исполненные контракты 44-ФЗ: ${d.gov_contracts_count} шт на ${(d.gov_contracts_value || 0).toLocaleString('ru')} ₽">44-ФЗ: ${d.gov_contracts_count}</span>`);
           }
@@ -666,7 +674,10 @@ async function openDossier(row) {
   }
 
   document.getElementById("sc-name").textContent = supplier.name;
-  document.getElementById("sc-pretitle").textContent = supplier.inn ? `ИНН ${supplier.inn}` : "Карточка контрагента";
+  const checkoUrl = supplier.checko_url || (supplier.inn ? `https://checko.ru/search?query=${supplier.inn}` : (supplier.ogrn ? `https://checko.ru/search?query=${supplier.ogrn}` : null));
+  document.getElementById("sc-pretitle").innerHTML = supplier.inn
+    ? `ИНН ${escapeHtml(supplier.inn)}${checkoUrl ? ` · <a href="${escapeHtml(checkoUrl)}" target="_blank" class="text-primary text-decoration-none fw-semibold">Чеко ↗</a>` : ""}`
+    : "Карточка контрагента";
 
   const st = WORKFLOW_STATUSES[supplier.status || "new"] || WORKFLOW_STATUSES.new;
   const container = document.getElementById("sc-body");
@@ -752,6 +763,11 @@ async function openDossier(row) {
         <span class="dossier-row-label">Сайт</span>
         <span class="dossier-row-value"><a href="${escapeHtml(supplier.site)}" target="_blank" class="text-decoration-none">${escapeHtml(supplier.site)}</a></span>
       </div>` : ""}
+      ${checkoUrl ? `
+      <div class="dossier-row">
+        <span class="dossier-row-label">Карточка ЕГРЮЛ</span>
+        <span class="dossier-row-value"><a href="${escapeHtml(checkoUrl)}" target="_blank" class="text-decoration-none fw-semibold">Проверить на checko.ru (выписки, суды, связи) ↗</a></span>
+      </div>` : ""}
     </div>
 
     <!-- Contacts -->
@@ -804,7 +820,7 @@ async function openDossier(row) {
     </div>
 
     <!-- Justification -->
-    ${(supplier.maps_url || supplier.checko_url) ? `
+    ${(supplier.maps_url || checkoUrl) ? `
     <div class="dossier-section">
       <div class="dossier-section-title">Внешние профили и репутация</div>
       ${supplier.maps_rating ? `
@@ -820,10 +836,10 @@ async function openDossier(row) {
         <span class="dossier-row-label">${supplier.maps_rating ? "Профиль на Картах" : "Поиск на Картах"}</span>
         <span class="dossier-row-value"><a href="${escapeHtml(supplier.maps_url)}" target="_blank" class="text-decoration-none">${supplier.maps_rating ? "Открыть отзывы и адрес" : "Найти организацию на карте"}</a></span>
       </div>` : ""}
-      ${supplier.checko_url ? `
+      ${checkoUrl ? `
       <div class="dossier-row">
         <span class="dossier-row-label">Карточка ЕГРЮЛ (checko)</span>
-        <span class="dossier-row-value"><a href="${escapeHtml(supplier.checko_url)}" target="_blank" class="text-decoration-none">Реквизиты, учредители, арбитражи</a></span>
+        <span class="dossier-row-value"><a href="${escapeHtml(checkoUrl)}" target="_blank" class="text-decoration-none">Реквизиты, учредители, арбитражи на checko.ru ↗</a></span>
       </div>` : ""}
     </div>` : ""}
 
@@ -967,7 +983,12 @@ function openComparisonModal() {
         </tr>
       </thead>
       <tbody>
-        ${makeRow("Юрлицо / ИНН", s => s.inn ? `ИНН ${escapeHtml(s.inn)}` : "—")}
+        ${makeRow("Юрлицо / ИНН", s => {
+          const cUrl = s.checko_url || (s.inn ? `https://checko.ru/search?query=${s.inn}` : (s.ogrn ? `https://checko.ru/search?query=${s.ogrn}` : null));
+          return s.inn
+            ? `ИНН ${escapeHtml(s.inn)}${cUrl ? ` · <a href="${escapeHtml(cUrl)}" target="_blank" class="small text-primary text-decoration-none">Чеко ↗</a>` : ""}`
+            : "—";
+        })}
         ${makeRow("Мин. заказ", s => s.min_order ? `<span class="badge bg-light text-dark border">${escapeHtml(s.min_order)}</span>` : "По согласованию")}
         ${makeRow("Ценовой диапазон", s => s.price_note ? escapeHtml(s.price_note.slice(0, 100)) : (s.price_min ? `${s.price_min} ₽` : "По запросу"))}
         ${makeRow("Опыт в 44-ФЗ", s => s.gov_contracts_count ? `<strong class="text-success">${s.gov_contracts_count} контр.</strong> (${(s.gov_contracts_value/1_000_000).toFixed(1)} млн ₽)` : "Нет в реестре")}

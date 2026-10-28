@@ -2,7 +2,7 @@
 
 > Аналитический B2B-сервис глубокого поиска, юридической проверки, скоринга и сравнения оптовых поставщиков продуктов питания, сырья, ингредиентов и упаковки с модулем рассылки запросов КП (RFQ).
 
-* **Работающий сервис (демо):** [https://maxim.org.ru/supplier-fnder/](https://maxim.org.ru/supplier-fnder/) *(зеркало: [https://maxim.org.ru/supplier-finder/](https://maxim.org.ru/supplier-finder/))*
+* **Работающий сервис (демо):** [https://maxim.org.ru/supplier-finder/](https://maxim.org.ru/supplier-finder/)
 * **Стек:** Python 3.12 / FastAPI (SSE) / SQLite / Playwright / Vanilla JS + Tabulator.js + Bootstrap 5 / Nginx / systemd
 
 ---
