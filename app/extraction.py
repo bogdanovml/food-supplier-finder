@@ -773,34 +773,238 @@ def extract_key_subpages(html: str, base_url: str) -> dict[str, str]:
     return found
 
 
-async def fetch_clean_page(url: str) -> tuple[str, str]:
-    """Скачивает страницу, а если это React/Vue SPA или пустая оболочка — рендерит браузером."""
+def extract_embedded_payload(raw_html: str) -> dict:
+    """Извлекает структурированные данные и состояние SSR гидратации из сырого HTML:
+    - Schema.org JSON-LD (<script type="application/ld+json">): Organization, LocalBusiness, Store, Product
+    - Next.js (<script id="__NEXT_DATA__">)
+    - Inertia.js (<div id="app" data-page="...">)
+    - Nuxt 2/3 (<script id="__NUXT_DATA__">, window.__NUXT__)
+    - Redux / Vuex / Pinia SSR (window.__INITIAL_STATE__, window.__PRELOADED_STATE__)
+    - Remix (window.__remixContext)
+    - Apollo GraphQL SSR (window.__APOLLO_STATE__)
+    - Meta description / OpenGraph (og:description)
+
+    Работает мгновенно (0.1 мс), извлекая контакты, юрлицо, город, цены и чистый каталог
+    БЕЗ надобности запускать тяжелый Playwright Chromium.
+    """
+    import html as _html_mod
+    res = {
+        "phones": set(),
+        "emails": set(),
+        "inn": None,
+        "ogrn": None,
+        "legal_name": None,
+        "org_name": None,
+        "city": None,
+        "prices": [],
+        "text_snippets": []
+    }
+    if not raw_html:
+        return res
+
+    def collect_strings(obj, acc, depth=0, max_items=40):
+        if len(acc) >= max_items or depth > 4:
+            return
+        if isinstance(obj, str):
+            clean = obj.strip()
+            if 10 <= len(clean) <= 300:
+                if not (clean.startswith("http") or clean.startswith("/_") or clean.startswith("data:")
+                        or clean.startswith("{") or clean.startswith("<")):
+                    acc.append(clean)
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                if len(acc) >= max_items:
+                    break
+                if k in ("css", "chunks", "runtimeConfig", "polyfilled", "modules", "webpack"):
+                    continue
+                collect_strings(v, acc, depth + 1, max_items)
+        elif isinstance(obj, list):
+            for v in obj[:20]:
+                if len(acc) >= max_items:
+                    break
+                collect_strings(v, acc, depth + 1, max_items)
+
+    # 1. Schema.org JSON-LD
+    ld_blocks = re.findall(r'<script[^>]*type=[\'"]application/ld\+json[\'"][^>]*>(.*?)</script>', raw_html, re.DOTALL | re.I)
+    for block in ld_blocks:
+        try:
+            data = json.loads(block.strip())
+            items = data if isinstance(data, list) else [data]
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                nodes = it.get("@graph") if isinstance(it.get("@graph"), list) else [it]
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    ntype = str(node.get("@type", ""))
+                    if any(t in ntype for t in ("Organization", "LocalBusiness", "Store", "WholesaleStore", "Company", "FoodEstablishment")):
+                        if node.get("name") and not res["org_name"]:
+                            res["org_name"] = str(node["name"]).strip()
+                        if node.get("legalName") and not res["legal_name"]:
+                            res["legal_name"] = str(node["legalName"]).strip()
+                        for key in ("taxID", "vatID", "inn"):
+                            if node.get(key) and not res["inn"]:
+                                val = re.sub(r"\D", "", str(node[key]))
+                                if len(val) in (10, 12):
+                                    res["inn"] = val
+                        if node.get("ogrn") and not res["ogrn"]:
+                            val = re.sub(r"\D", "", str(node["ogrn"]))
+                            if len(val) in (13, 15):
+                                res["ogrn"] = val
+                        if node.get("telephone"):
+                            tels = node["telephone"] if isinstance(node["telephone"], list) else [node["telephone"]]
+                            for t in tels:
+                                res["phones"].add(str(t).strip())
+                        if node.get("email"):
+                            ems = node["email"] if isinstance(node["email"], list) else [node["email"]]
+                            for e in ems:
+                                res["emails"].add(str(e).strip().lower())
+                        addr = node.get("address")
+                        if isinstance(addr, dict):
+                            loc = addr.get("addressLocality") or addr.get("addressRegion")
+                            if loc and not res["city"]:
+                                res["city"] = str(loc).strip()
+                            st = addr.get("streetAddress") or ""
+                            res["text_snippets"].append(f"Адрес компании: {loc or ''} {st}".strip())
+                    if "ContactPoint" in ntype:
+                        if node.get("telephone"):
+                            tels = node["telephone"] if isinstance(node["telephone"], list) else [node["telephone"]]
+                            for t in tels:
+                                res["phones"].add(str(t).strip())
+                        if node.get("email"):
+                            ems = node["email"] if isinstance(node["email"], list) else [node["email"]]
+                            for e in ems:
+                                res["emails"].add(str(e).strip().lower())
+                    if "Product" in ntype:
+                        pname = str(node.get("name") or "").strip()
+                        offers = node.get("offers")
+                        off_list = offers if isinstance(offers, list) else ([offers] if isinstance(offers, dict) else [])
+                        for off in off_list:
+                            if isinstance(off, dict):
+                                pr = off.get("price")
+                                cur = off.get("priceCurrency") or "RUB"
+                                if pr:
+                                    res["prices"].append(f"{pname}: {pr} {cur}".strip())
+        except Exception:
+            pass
+
+    # 2. Next.js: <script id="__NEXT_DATA__">
+    m_next = re.search(r'<script[^>]*id=[\'"]__NEXT_DATA__[\'"][^>]*>(.*?)</script>', raw_html, re.DOTALL | re.I)
+    if m_next:
+        try:
+            d = json.loads(m_next.group(1).strip())
+            pp = d.get("props", {}).get("pageProps", {})
+            collected = []
+            collect_strings(pp, collected)
+            if collected:
+                res["text_snippets"].append(" ".join(collected))
+        except Exception:
+            pass
+
+    # 3. Inertia.js: data-page
+    m_inertia = re.search(r'data-page=([\'"])(.*?)\1', raw_html, re.DOTALL | re.I)
+    if m_inertia:
+        try:
+            d = json.loads(_html_mod.unescape(m_inertia.group(2)))
+            props = d.get("props", {})
+            collected = []
+            collect_strings(props, collected)
+            if collected:
+                res["text_snippets"].append(" ".join(collected))
+        except Exception:
+            pass
+
+    # 4. Redux / Vuex / Pinia / Remix / Nuxt State
+    state_patterns = [
+        r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});?\s*</script>',
+        r'window\.__PRELOADED_STATE__\s*=\s*(\{.*?\});?\s*</script>',
+        r'window\.__remixContext\s*=\s*(\{.*?\});?\s*</script>',
+        r'<script[^>]*id=[\'"]__NUXT_DATA__[\'"][^>]*>(.*?)</script>',
+        r'window\.__NUXT__\s*=\s*(\{.*?\});?\s*</script>',
+        r'window\.__APOLLO_STATE__\s*=\s*(\{.*?\});?\s*</script>'
+    ]
+    for sp in state_patterns:
+        m = re.search(sp, raw_html, re.DOTALL | re.I)
+        if m:
+            raw_blob = m.group(1).strip()
+            try:
+                d = json.loads(raw_blob)
+                collected = []
+                collect_strings(d, collected)
+                if collected:
+                    res["text_snippets"].append(" ".join(collected))
+            except Exception:
+                pass
+
+    # 5. OpenGraph & Meta description
+    m_desc = re.search(r'<meta[^>]*name=[\'"]description[\'"][^>]*content=[\'"]([^\'"]+)[\'"]', raw_html, re.I)
+    if m_desc:
+        res["text_snippets"].append(f"Описание: {_html_mod.unescape(m_desc.group(1))}")
+    m_og = re.search(r'<meta[^>]*property=[\'"]og:description[\'"][^>]*content=[\'"]([^\'"]+)[\'"]', raw_html, re.I)
+    if m_og:
+        res["text_snippets"].append(f"О компании: {_html_mod.unescape(m_og.group(1))}")
+
+    return res
+
+
+async def fetch_clean_page(url: str) -> tuple[str, str, dict]:
+    """Скачивает страницу, извлекает встроенные данные гидратации (Schema.org JSON-LD,
+    Next.js __NEXT_DATA__, Nuxt, Inertia.js, Redux, Remix), а при реальной необходимости
+    в JS-рендере — запускает браузер Playwright.
+    Возвращает (html, text, embedded)."""
     html = await fetch_html(url)
     text = _text_of(html or "")
-    if len(text) < 250 or '<div id="root">' in (html or "") or '<div id="app">' in (html or "") or '__next' in (html or ""):
+    embedded = extract_embedded_payload(html or "")
+
+    # Обогащаем текстовый слой плоским текстом из гидратации/метатегов
+    if embedded.get("text_snippets"):
+        extra = "\n".join(embedded["text_snippets"])
+        text = f"{text}\n{extra}".strip()
+
+    # Полноценная проверка надобности в Playwright Chromium:
+    # 1. Если текст уже достаточный (>= 300 символов), Chromium НЕ нужен.
+    # 2. Если в гидратации уже найдены прямые контакты (телефоны/email), Chromium НЕ нужен.
+    # 3. Chromium нужен ТОЛЬКО если текст пустой/тонкий (< 300) И нет контактов из гидратации,
+    #    И в HTML есть маркеры пустой SPA-оболочки (<div id="root">, <div id="app">).
+    has_contacts_in_embedded = bool(embedded.get("phones") or embedded.get("emails"))
+    is_spa_shell = ('<div id="root">' in (html or "") or '<div id="app">' in (html or ""))
+    needs_render = (len(text) < 300 and not has_contacts_in_embedded) or (is_spa_shell and len(text) < 200)
+
+    if needs_render:
         rendered = await render_html(url)
         if rendered:
             html = rendered
             text = _text_of(html)
-    return html or "", text or ""
+            if not has_contacts_in_embedded:
+                emb_rendered = extract_embedded_payload(html)
+                for k, v in emb_rendered.items():
+                    if isinstance(v, set):
+                        embedded[k].update(v)
+                    elif isinstance(v, list):
+                        embedded[k].extend(v)
+                    elif v and not embedded.get(k):
+                        embedded[k] = v
+
+    return html or "", text or "", embedded
 
 async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFacts:
     """Комплексный анализ компании по сайту:
-    1. Читает посадочную страницу (с авто-рендером React/Vue SPA);
+    1. Читает посадочную страницу (с авто-рендером React/Vue SPA и парсингом SSR гидратации);
     2. Извлекает из меню и футера ссылки на Доставку, О компании, Контакты;
     3. Скачивает и рендерит эти страницы параллельно;
-    4. Извлекает контакты, телефоны, email и ИНН;
+    4. Извлекает контакты, телефоны, email, ИНН и цены (включая Schema.org / State);
     5. Передает комплексный текст (товар + компания + доставка) в LLM,
        чтобы модель видела полную картину, а не обрывок товарного каталога!
     """
     facts = SiteFacts(url=url, method="holistic")
 
     # 1. Посадочная страница
-    landing_html, landing_text = await fetch_clean_page(url)
+    landing_html, landing_text, landing_emb = await fetch_clean_page(url)
     if not landing_html:
         root_url = f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}/"
         if root_url.rstrip("/") != url.rstrip("/"):
-            landing_html, landing_text = await fetch_clean_page(root_url)
+            landing_html, landing_text, landing_emb = await fetch_clean_page(root_url)
 
     if not landing_html or len(landing_text) < 40:
         facts.method = "failed"
@@ -809,18 +1013,49 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     facts.ok = True
     facts.rendered = True
 
+    # Применяем прямые факты из гидратации посадочной страницы
+    for p in landing_emb.get("phones", []):
+        cp = _clean_phone(p)
+        if cp and cp not in facts.phones:
+            facts.phones.append(cp)
+    for e in landing_emb.get("emails", []):
+        if e and e not in facts.emails:
+            facts.emails.append(e)
+    if landing_emb.get("inn"):
+        facts.inn = landing_emb["inn"]
+    if landing_emb.get("ogrn"):
+        facts.ogrn = landing_emb["ogrn"]
+    if landing_emb.get("legal_name"):
+        facts.legal_name = landing_emb["legal_name"]
+    if landing_emb.get("city"):
+        facts.city = landing_emb["city"]
+    if landing_emb.get("prices"):
+        facts.prices.extend(landing_emb["prices"])
+
     # 2. Поиск ключевых страниц в DOM навигации (меню, футер)
     subpages = extract_key_subpages(landing_html, url)
 
     # Если посадочная страница глубокая (товар), а меню там нет — проверим корень сайта
     root_url = f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}/"
     if ("delivery" not in subpages or "about" not in subpages) and root_url.rstrip("/") != url.rstrip("/"):
-        root_html, _ = await fetch_clean_page(root_url)
+        root_html, _, root_emb = await fetch_clean_page(root_url)
         if root_html:
             root_subpages = extract_key_subpages(root_html, root_url)
             for k, v in root_subpages.items():
                 if k not in subpages:
                     subpages[k] = v
+            # добираем реквизиты с корня
+            for p in root_emb.get("phones", []):
+                cp = _clean_phone(p)
+                if cp and cp not in facts.phones:
+                    facts.phones.append(cp)
+            for e in root_emb.get("emails", []):
+                if e and e not in facts.emails:
+                    facts.emails.append(e)
+            if root_emb.get("inn") and not facts.inn:
+                facts.inn = root_emb["inn"]
+            if root_emb.get("legal_name") and not facts.legal_name:
+                facts.legal_name = root_emb["legal_name"]
 
     # Фолбэк типовых путей доставки/контактов, если в меню их нет
     if "delivery" not in subpages:
@@ -828,7 +1063,7 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     if "contacts" not in subpages:
         subpages["contacts"] = f"{root_url}contacts/"
 
-    # 3. Параллельное скачивание ключевых подстраниц (с авто-рендером SPA!)
+    # 3. Параллельное скачивание ключевых подстраниц (с авто-рендером SPA и гидратацией!)
     fetch_tasks = {
         cat: fetch_clean_page(u)
         for cat, u in subpages.items()
@@ -837,15 +1072,28 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
     sub_texts: dict[str, str] = {}
     if fetch_tasks:
         res = await asyncio.gather(*fetch_tasks.values())
-        for cat, (h, t) in zip(fetch_tasks.keys(), res):
-            if len(t) >= 100:  # страница существует и содержит текст
+        for cat, (h, t, emb) in zip(fetch_tasks.keys(), res):
+            if len(t) >= 60:
                 sub_texts[cat] = t
+                for p in emb.get("phones", []):
+                    cp = _clean_phone(p)
+                    if cp and cp not in facts.phones:
+                        facts.phones.append(cp)
+                for e in emb.get("emails", []):
+                    if e and e not in facts.emails:
+                        facts.emails.append(e)
+                if emb.get("inn") and not facts.inn:
+                    facts.inn = emb["inn"]
+                if emb.get("legal_name") and not facts.legal_name:
+                    facts.legal_name = emb["legal_name"]
+                if emb.get("city") and not facts.city:
+                    facts.city = emb["city"]
 
     # 4. Регулярки по ВСЕМ скачанным страницам (контакты, ИНН, ОГРН)
     all_combined_text = f"{landing_text}\n" + "\n".join(sub_texts.values())
     rg_facts = regex_facts(url, all_combined_text)
-    facts.phones = rg_facts.phones
-    facts.emails = rg_facts.emails
+    facts.phones = list(dict.fromkeys(facts.phones + rg_facts.phones))
+    facts.emails = list(dict.fromkeys(facts.emails + rg_facts.emails))
     facts.certificates = rg_facts.certificates
 
     legal = extract_legal_from_text(all_combined_text)
