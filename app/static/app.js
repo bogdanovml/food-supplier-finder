@@ -151,6 +151,17 @@ function setupEventListeners() {
   document.getElementById("tab-other-regions").addEventListener("click", () => switchView("other-regions"));
   document.getElementById("btn-select-all").addEventListener("click", toggleSelectAll);
 
+  // Quick query buttons in zero-state
+  document.querySelectorAll(".quick-query-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.getElementById("query").value = btn.dataset.query;
+      if (btn.dataset.region) {
+        document.getElementById("region").value = btn.dataset.region;
+      }
+      document.getElementById("search-btn").focus();
+    });
+  });
+
   // Filter pills
   document.querySelectorAll("#filter-pills button").forEach(btn => {
     btn.addEventListener("click", (e) => {

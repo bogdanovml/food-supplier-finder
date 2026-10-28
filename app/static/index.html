@@ -62,23 +62,32 @@
 
     <!-- ONBOARDING ZERO-STATE -->
     <div id="zero-state" class="card card-surface mb-4">
-      <div class="card-body p-5">
-        <div class="row g-4 align-items-center">
+      <div class="card-body p-4 p-md-5">
+        <div class="row g-4 align-items-stretch">
           <div class="col-lg-4 border-end">
             <div class="step-num">01</div>
-            <div class="step-title">Многоканальный сбор</div>
-            <div class="step-desc">Одновременный опрос региональной выдачи Яндекса, Google XML, оптового каталога optlist.ru и реестра госконтрактов 44-ФЗ.</div>
+            <div class="step-title">Многоканальный сбор и ЕГРЮЛ</div>
+            <div class="step-desc">Параллельный опрос Яндекс Live, Google XML, B2B-каталога optlist.ru, контрактов 44-ФЗ (ОКПД2) и справочника юрлиц. Верификация реквизитов через DaData и Checko с ротацией HTTP/2 прокси.</div>
           </div>
           <div class="col-lg-4 border-end">
             <div class="step-num">02</div>
-            <div class="step-title">Обогащение и дедупликация</div>
-            <div class="step-desc">Слияние по ИНН, доменам и нечетким наименованиям. Автоматический обход сайтов: извлечение контактов, цен, сертификатов (ХАССП, ГОСТ) и минимального заказа.</div>
+            <div class="step-title">Финансовый скоринг ФНС и парсинг</div>
+            <div class="step-desc">Официальная отчётность ФНС БФО (выручка, прибыль/убыток, активы). Мгновенное извлечение цен, условий доставки и сертификатов (ХАССП, ГОСТ) через SSR-гидратацию и нейросетевой анализ.</div>
           </div>
           <div class="col-lg-4">
             <div class="step-num">03</div>
-            <div class="step-title">Принятие решения и RFQ</div>
-            <div class="step-desc">Сравнение условий side-by-side, обоснование выбора от LLM, ведение заметок и рассылка запросов коммерческих предложений.</div>
+            <div class="step-title">Сравнение, RFQ и почтовый контур</div>
+            <div class="step-desc">Матрица сравнения side-by-side, экспорт в XLSX. Персональная отправка запросов КП без открытых копий (SMTP), безопасный тестовый режим с автоответами и просмотр входящих по IMAP.</div>
           </div>
+        </div>
+
+        <div class="mt-4 pt-4 border-top d-flex flex-wrap align-items-center gap-2">
+          <span class="text-muted small me-2">Примеры запросов для проверки:</span>
+          <button type="button" class="btn btn-sm btn-outline-secondary quick-query-btn" data-query="масло сливочное ГОСТ" data-region="Нижегородская область">масло сливочное ГОСТ</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary quick-query-btn" data-query="рыба свежая" data-region="Нижегородская область">рыба свежая</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary quick-query-btn" data-query="мука пшеничная в/с" data-region="Москва">мука пшеничная в/с</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary quick-query-btn" data-query="томатная паста оптом" data-region="Краснодарский край">томатная паста оптом</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary quick-query-btn" data-query="сыр российский" data-region="Москва">сыр российский</button>
         </div>
       </div>
     </div>
