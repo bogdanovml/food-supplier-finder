@@ -20,7 +20,8 @@ from .config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = httpx.Timeout(connect=10, read=90, write=15, pool=30)
+_TIMEOUT = httpx.Timeout(connect=6, read=35, write=10, pool=20)
+_llm_sem = asyncio.Semaphore(5)
 
 
 class LLMError(RuntimeError):
@@ -29,26 +30,27 @@ class LLMError(RuntimeError):
 
 async def _post_chat(payload: dict, api_key: str, base_url: str, retries: int = 2) -> str:
     last_exc: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json=payload,
-                )
-                if resp.status_code == 429:
-                    raise httpx.HTTPStatusError("429", request=resp.request, response=resp)
-                resp.raise_for_status()
-            data = resp.json()
-            content = (data.get("choices") or [{}])[0].get("message", {}).get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise LLMError("пустой ответ LLM")
-            return content.strip()
-        except (httpx.HTTPError, LLMError) as exc:
-            last_exc = exc
-            if attempt < retries:
-                await asyncio.sleep(1.5 * (attempt + 1))
+    async with _llm_sem:
+        for attempt in range(retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                        json=payload,
+                    )
+                    if resp.status_code == 429:
+                        raise httpx.HTTPStatusError("429", request=resp.request, response=resp)
+                    resp.raise_for_status()
+                data = resp.json()
+                content = (data.get("choices") or [{}])[0].get("message", {}).get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise LLMError("пустой ответ LLM")
+                return content.strip()
+            except (httpx.HTTPError, LLMError) as exc:
+                last_exc = exc
+                if attempt < retries:
+                    await asyncio.sleep(1.0 * (attempt + 1))
     raise LLMError(f"LLM request failed: {last_exc}")
 
 

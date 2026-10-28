@@ -500,7 +500,7 @@ async def _checko_contacts_pass(cards: list, emit: Emit) -> None:
             c.checko_url = f"https://checko.ru/search?query={ident}"
 
 
-async def _maps_pass(cards: list, emit: Emit, region_name: str, limit: int = 10) -> None:
+async def _maps_pass(cards: list, emit: Emit, region_name: str, limit: int = 5) -> None:
     """Водопад, финальный (самый тяжёлый и низкоурожайный): Яндекс Карты."""
     from .sources.maps import org_profile
     from .merge import region_ok as _rok
@@ -594,8 +594,10 @@ async def _find_sites_for(cards: list, emit: Emit, limit: int = 60) -> None:
             for engine in ("yandexlive", "google"):
                 async with sem:
                     try:
-                        hits = await serp_src.fetch_serp([query], lr=225, top=10,
-                                                         engines=[engine])
+                        hits = await asyncio.wait_for(
+                            serp_src.fetch_serp([query], lr=225, top=10, engines=[engine]),
+                            timeout=4.0
+                        )
                     except Exception as exc:
                         logger.debug("site search '%s' via %s failed: %s", query, engine, exc)
                         hits = []
@@ -921,8 +923,8 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
         if siteless:
             siteless.sort(key=lambda c: c.relevance, reverse=True)
             await emit({"type": "stage", "stage": "company", "status": "run",
-                        "message": f"поиск сайтов по названию: {min(len(siteless), 40)} компаний"})
-            await _find_sites_for(siteless[:40], emit, limit=40)
+                        "message": f"поиск сайтов по названию: {min(len(siteless), 15)} компаний"})
+            await _find_sites_for(siteless[:15], emit, limit=15)
 
         # --- 5. Обход сайтов: ВСЕ дефицитные с сайтом (самый тяжёлый
         #     источник ~10-20с/шт, поэтому последним). Дефицит-приоритет:

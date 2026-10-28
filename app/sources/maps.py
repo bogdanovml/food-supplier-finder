@@ -35,7 +35,7 @@ async def org_profile(name: str, city: str) -> dict | None:
     """
     query = quote(f"{name} {city}")
     html, final_url = await render_page(
-        f"https://yandex.ru/maps/?text={query}", wait_ms=4500)
+        f"https://yandex.ru/maps/?text={query}", wait_ms=2000)
     if not html:
         return None
     m = RE_ORG_URL.search(final_url)

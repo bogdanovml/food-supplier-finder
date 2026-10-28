@@ -31,7 +31,7 @@ from .llm import ask_json
 
 logger = logging.getLogger(__name__)
 
-FETCH_TIMEOUT = httpx.Timeout(15, connect=8)
+FETCH_TIMEOUT = httpx.Timeout(connect=3.5, read=6.0, write=4.0, pool=8.0)
 HTML_TRIM = 6000          # столько текста достаточно LLM для вердикта
 PAGE_LIMIT = 1_500_000       # не тянем гигантские страницы (мегабайт — потолок)
 
@@ -145,8 +145,6 @@ async def fetch_html(url: str) -> str:
     urls_to_try = [url]
     if url.startswith("https://"):
         urls_to_try.append("http://" + url[8:])
-    elif url.startswith("http://"):
-        urls_to_try.append("https://" + url[7:])
 
     for u in urls_to_try:
         try:
@@ -166,6 +164,9 @@ async def fetch_html(url: str) -> str:
                         except Exception:
                             pass
                     return resp.text
+        except httpx.TimeoutException:
+            # Хост не отвечает по таймауту — не тратим время на второй круг по http
+            break
         except Exception:
             continue
     return ""
@@ -948,14 +949,22 @@ def extract_embedded_payload(raw_html: str) -> dict:
     return res
 
 
-async def fetch_clean_page(url: str) -> tuple[str, str, dict]:
+async def fetch_clean_page(url: str, *, allow_render: bool = True) -> tuple[str, str, dict]:
     """Скачивает страницу, извлекает встроенные данные гидратации (Schema.org JSON-LD,
     Next.js __NEXT_DATA__, Nuxt, Inertia.js, Redux, Remix), а при реальной необходимости
     в JS-рендере — запускает браузер Playwright.
     Возвращает (html, text, embedded)."""
     html = await fetch_html(url)
-    text = _text_of(html or "")
-    embedded = extract_embedded_payload(html or "")
+    if not html or len(html.strip()) < 50:
+        return "", "", {}
+
+    low_html = html.lower()
+    if any(err in low_html for err in ("404 not found", "страница не найдена", "ошибка 404",
+                                       "403 forbidden", "403 доступ запрещен", "доступ ограничен")):
+        return html, "", {}
+
+    text = _text_of(html)
+    embedded = extract_embedded_payload(html)
 
     # Обогащаем текстовый слой плоским текстом из гидратации/метатегов
     if embedded.get("text_snippets"):
@@ -963,13 +972,15 @@ async def fetch_clean_page(url: str) -> tuple[str, str, dict]:
         text = f"{text}\n{extra}".strip()
 
     # Полноценная проверка надобности в Playwright Chromium:
-    # 1. Если текст уже достаточный (>= 300 символов), Chromium НЕ нужен.
-    # 2. Если в гидратации уже найдены прямые контакты (телефоны/email), Chromium НЕ нужен.
-    # 3. Chromium нужен ТОЛЬКО если текст пустой/тонкий (< 300) И нет контактов из гидратации,
-    #    И в HTML есть маркеры пустой SPA-оболочки (<div id="root">, <div id="app">).
+    # 1. Если allow_render=False — Chromium запрещен (например, догадки подстраниц).
+    # 2. Если в гидратации уже найдены прямые контакты (телефоны/email) — Chromium НЕ нужен.
+    # 3. Если текст уже достаточный (>= 250 символов) — Chromium НЕ нужен.
+    # 4. Chromium нужен ТОЛЬКО если allow_render=True, контактов нет, а разметка — явная SPA-пустышка.
     has_contacts_in_embedded = bool(embedded.get("phones") or embedded.get("emails"))
-    is_spa_shell = ('<div id="root">' in (html or "") or '<div id="app">' in (html or ""))
-    needs_render = (len(text) < 300 and not has_contacts_in_embedded) or (is_spa_shell and len(text) < 200)
+    is_spa_shell = ('<div id="root">' in html or '<div id="app">' in html)
+    needs_render = allow_render and not has_contacts_in_embedded and (
+        (is_spa_shell and len(text) < 250) or (len(text) < 120 and not embedded.get("text_snippets"))
+    )
 
     if needs_render:
         rendered = await render_html(url)
@@ -986,7 +997,7 @@ async def fetch_clean_page(url: str) -> tuple[str, str, dict]:
                     elif v and not embedded.get(k):
                         embedded[k] = v
 
-    return html or "", text or "", embedded
+    return html, text, embedded
 
 async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFacts:
     """Комплексный анализ компании по сайту:
@@ -1057,15 +1068,18 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
             if root_emb.get("legal_name") and not facts.legal_name:
                 facts.legal_name = root_emb["legal_name"]
 
-    # Фолбэк типовых путей доставки/контактов, если в меню их нет
+    # Фолбэк типовых путей доставки/контактов, если в меню их нет (без Playwright!)
+    guessed_keys = set()
     if "delivery" not in subpages:
         subpages["delivery"] = f"{root_url}delivery/"
+        guessed_keys.add("delivery")
     if "contacts" not in subpages:
         subpages["contacts"] = f"{root_url}contacts/"
+        guessed_keys.add("contacts")
 
     # 3. Параллельное скачивание ключевых подстраниц (с авто-рендером SPA и гидратацией!)
     fetch_tasks = {
-        cat: fetch_clean_page(u)
+        cat: fetch_clean_page(u, allow_render=(cat not in guessed_keys))
         for cat, u in subpages.items()
         if cat in ("delivery", "about", "contacts", "legal")
     }

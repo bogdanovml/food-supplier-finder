@@ -49,21 +49,25 @@ DOMAIN_BLACKLIST: set[str] = {
     "productcenter.ru", "cataloxy.ru", "orgpage.ru", "orgs.biz", "blizko.ru",
     "regtorg.ru", "glavtorg.com", "flagma.ru", "b2b-russia.ru", "promportal.su",
     "all-gorod.ru", "spravker.ru", "jsprav.ru", "fis.ru", "propartner.ru",
-    "grainboard.ru", "meatinfo.ru", "milknet.ru", "foodmarkets.ru",
+    "grainboard.ru", "meatinfo.ru", "milknet.ru", "milknet.biz", "foodmarkets.ru",
     "postavshhiki.ru", "postavshikov.ru", "optom.ru", "yp.ru", "allbiz.ru",
+    "yell.ru", "rubrikator.org", "pulpro.ru", "tradedir.ru", "agroru.com",
     # досье/вакансии/финансы — не сайты поставщиков
     "hh.ru", "superjob.ru", "spark-interfax.ru", "audit-it.ru", "casebook.ru",
     "saby.ru", "kontur.ru", "tochka.com", "klerk.ru", "star-pro.ru",
     "vbankcenter.ru", "synapsenet.ru", "licexpert.ru", "2gis.ru",
     "prima-inform.ru", "otc.ru", "tbank.ru", "trudvsem.ru", "tass.ru",
+    "companium.ru", "zachestnyibiznes.ru", "fedresurs.ru",
+    # госорганы / реестры (не поставщики)
+    "vetrf.ru", "fsvps.gov.ru", "mcx.gov.ru", "nalog.gov.ru", "fsrar.gov.ru",
     # отраслевые каталоги/справочники food
     "fishnet.ru", "fishretail.ru", "fishery.ru", "akvakultura.ru",
     "svoefermerstvo.ru", "shopprodukt.ru", "ikra.info", "ved55.ru",
     "kartoteka.ru", "banki.ru", "sravni.ru", "vc.ru", "bankcenterfinance.ru",
-    # соцсети/видео/справка/медиа
-    "vk.com", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",
+    # соцсети/видео/игры/справка/медиа
+    "vk.com", "vk.ru", "vkvideo.ru", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",
     "tiktok.com", "pinterest.com", "ru.pinterest.com", "facebook.com", "twitter.com", "x.com",
-    "threads.net", "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru",
+    "threads.net", "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru", "playhop.com",
     # кулинарные сайты / рецепты (ни в коем случае не поставщики!)
     "povarenok.ru", "iamcook.ru", "eda.ru", "gastronom.ru", "1000.menu", "menunedeli.ru",
     "gotovim.ru", "koolinar.ru", "russianfood.com", "allrecipes.com", "tvoirecepty.ru",

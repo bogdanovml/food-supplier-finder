@@ -69,9 +69,12 @@ class GovSupplier:
                 "contracts": [c.to_dict() for c in self.contracts]}
 
 
+_gosplan_sem = asyncio.Semaphore(3)
+_contracts_cache: dict[str, tuple[float, dict]] = {}
+
+
 def _client() -> httpx.AsyncClient:
-    # Госплан «думает» до 14с на сложных запросах (prod-опыт tender/nmck)
-    return httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=45, write=30, pool=60))
+    return httpx.AsyncClient(timeout=httpx.Timeout(connect=6, read=25, write=15, pool=30))
 
 
 async def _get(client: httpx.AsyncClient, path: str, params: dict | None = None,
@@ -79,16 +82,18 @@ async def _get(client: httpx.AsyncClient, path: str, params: dict | None = None,
     base = get_settings().gosplan_base_url.rstrip("/")
     for attempt in range(retries + 1):
         try:
-            resp = await client.get(f"{base}{path}", params=params)
-            if resp.status_code == 429:  # у тестового сервера жёсткий rate limit
-                await asyncio.sleep(5 * (attempt + 1))
-                continue
-            resp.raise_for_status()
-            return resp.json()
+            async with _gosplan_sem:
+                await asyncio.sleep(0.06)  # микро-пауза защищает тестовый сервер Госплана от 429
+                resp = await client.get(f"{base}{path}", params=params)
+                if resp.status_code == 429:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                return resp.json()
         except httpx.HTTPError as exc:
             logger.debug("gosplan %s failed (attempt %d): %s", path, attempt + 1, exc)
             if attempt < retries:
-                await asyncio.sleep(1.5 * (attempt + 1))
+                await asyncio.sleep(1.0 * (attempt + 1))
     return None
 
 
@@ -163,50 +168,48 @@ async def search_gov_suppliers(query: str, *, region_code: int | None,
                                limit: int = 20, max_details: int = 10) -> list[GovSupplier]:
     """Поставщики с агрегированными контрактами по теме запроса.
 
-    Поток: classifier-поиск (ОКПД2) -> subject-поиск -> объединение ->
-    группировка по ИНН -> имена из карточек -> только распознанные.
+    Поток: параллельный опрос классификаторов (ОКПД2) и ключевых слов ->
+    дедупликация -> имена поставщиков через карточки -> агрегация.
     """
     raws: list[dict] = []
     async with _client() as client:
-        # --- 1. классификаторный поиск (главный) ---
+        # Собираем параметры классификаторных и полнотекстовых запросов
+        fetch_specs = []
         if classifiers:
             for code in classifiers[:3]:
-                params: dict = {"classifier": code, "limit": limit,
-                                "sort": "price_desc", "stage": "EC"}
+                p = {"classifier": code, "limit": limit, "sort": "price_desc", "stage": "EC"}
                 if region_code:
-                    params["region"] = region_code
-                data = await _get(client, "/fz44/contracts", params)
-                raws += _index_to_raw(data, "EC", by_classifier=True)
-                if len(raws) < 5:  # дополнительно исполняющиеся
-                    params["stage"] = "E"
-                    data = await _get(client, "/fz44/contracts", params)
-                    raws += _index_to_raw(data, "E", by_classifier=True)
+                    p["region"] = region_code
+                fetch_specs.append((p, "EC", True))
+                p_e = {"classifier": code, "limit": limit, "sort": "price_desc", "stage": "E"}
+                if region_code:
+                    p_e["region"] = region_code
+                fetch_specs.append((p_e, "E", True))
 
-        # --- 2. полнотекстовый поиск (уточнение) ---
-        # Полнотекстовый поиск ОБЯЗАН фильтроваться по ключевым словам запроса:
-        # Госплан делает OR-поиск по словам («шампиньоны OR свежие»), и по слову
-        # «свежие» находит контракты на яйца (кейс «Чебаркульская птица»)!
         core_stems = get_core_stems(query)
-        exact_q = f'"{query}"'
-        subject_queries = [exact_q]
+        subject_queries = [f'"{query}"']
         if core_stems:
             subject_queries.append(core_stems[0])
 
-        for subject_q in subject_queries:
+        for sq in subject_queries:
             for stage in ("EC", "E"):
-                params = {"subject": subject_q, "stage": stage, "limit": limit,
-                          "sort": "price_desc"}
+                p = {"subject": sq, "stage": stage, "limit": limit, "sort": "price_desc"}
                 if region_code:
-                    params["region"] = region_code
-                data = await _get(client, "/fz44/contracts", params)
-                new_raws = _index_to_raw(data, stage, by_classifier=False)
-                # Фильтруем полнотекстовые совпадения: в теме контракта ДОЛЖНО быть
-                # ключевое слово товара, а не случайное прилагательное «свежий»
-                if core_stems:
-                    new_raws = [r for r in new_raws if any(s in (r["subject"] or "").lower() for s in core_stems)]
-                raws += new_raws
-            if len(raws) > 5:
-                break
+                    p["region"] = region_code
+                fetch_specs.append((p, stage, False))
+
+        async def _run_one_spec(spec):
+            params, stage, by_cls = spec
+            data = await _get(client, "/fz44/contracts", params)
+            res = _index_to_raw(data, stage, by_classifier=by_cls)
+            if not by_cls and core_stems:
+                res = [r for r in res if any(s in (r["subject"] or "").lower() for s in core_stems)]
+            return res
+
+        # Все спецификации опрашиваются параллельно под контролем семафора _gosplan_sem
+        spec_results = await asyncio.gather(*[_run_one_spec(s) for s in fetch_specs])
+        for r_list in spec_results:
+            raws.extend(r_list)
 
         # дедуп по reg_num
         seen_regs: set[str] = set()
@@ -240,11 +243,14 @@ async def search_gov_suppliers(query: str, *, region_code: int | None,
 async def contracts_by_inn(inn: str, *, limit: int = 5) -> dict:
     """Краткая стата контрактов поставщика по ИНН: 44-ФЗ + 223-ФЗ.
 
-    223-ФЗ: в индексе Госплана поле suppliers пустое (проверено живыми
-    запросами — атрибуция не отдаётся), но параметр supplier=<ИНН>
-    фильтрует корректно. Поэтому 223-опыт проверяем по ИНН на стадии
-    юрлица, а в предметном поиске — только 44-ФЗ.
+    Кэшируется в памяти (TTL 1 час), чтобы при повторных проходах не стучать в API.
     """
+    import time as _t
+    now = _t.time()
+    cached = _contracts_cache.get(inn)
+    if cached and (now - cached[0]) < 3600:
+        return cached[1]
+
     total_count = 0
     total_value = 0.0
     example = None
@@ -265,4 +271,6 @@ async def contracts_by_inn(inn: str, *, limit: int = 5) -> dict:
                            "price": float(i.get("price") or 0),
                            "subject": i.get("subject"),
                            "source": source}
-    return {"count": total_count, "value": total_value, "example": example}
+    res = {"count": total_count, "value": total_value, "example": example}
+    _contracts_cache[inn] = (now, res)
+    return res
