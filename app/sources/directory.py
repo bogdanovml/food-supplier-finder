@@ -22,7 +22,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from ..renderer import render_html
+from ..proxy import fetch_checko
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +58,9 @@ def okved_to_url_code(okved: str) -> str:
 RE_CITY = re.compile(r"г\.?\s+([А-ЯЁ][а-яё\-]+)")
 # строка каталога: ссылка + блок данных
 RE_ROW = re.compile(
-    r'href="(/company/[a-z0-9-]+-(\d{13}))"[^>]*>([^<]+)</a>\s*'
-    r"<div>([^<]+)</div>"          # адрес
-    r"(?:\s*<div>(.*?)</div>)?",   # директор / дата регистрации
+    r'<a[^>]+href="(/company/[a-z0-9-]+-(\d{13,15}))"[^>]*>(.*?)</a>\s*'
+    r'<div>(.*?)</div>'
+    r'(.*?)(?=</td>|\Z)',
     re.DOTALL,
 )
 RE_DIRECTOR = re.compile(r"(?:Генеральный директор|Директор|директор|Руководитель)(?:</span>)?\s*([А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+)")
@@ -70,11 +70,12 @@ RE_PROFIT = re.compile(r"Чистая прибыль(?:</span>)?\s*([\d.,]+\s*(?
 
 
 def parse_catalog(html: str, okved_code: str) -> list[DirectoryHit]:
-    """Страница каталога -> список юрлиц. HTML уже отрендерен."""
+    """Страница каталога -> список юрлиц."""
+    import html as html_mod
     hits: list[DirectoryHit] = []
     for m in RE_ROW.finditer(html):
-        href, ogrn, name, address, extra = m.groups()
-        name = name.strip()
+        href, ogrn, name_raw, address, extra = m.groups()
+        name = html_mod.unescape(re.sub(r"<[^>]+>", " ", name_raw)).strip()
         address = re.sub(r"\s+", " ", address).strip()
         city = ""
         cm = RE_CITY.search(address)
@@ -126,31 +127,29 @@ CHECKO_BLOCKED = False  # капча на каталоге checko: страни�
 
 async def search_okved_directory(okved_codes: list[str], *, region_name: str,
                                   max_per_code: int = 100) -> list[DirectoryHit]:
-    """Каталог юрлиц по ОКВЭД-кодам, отфильтрованный по региону.
-
-    2 страницы по 50 строк на код; региональный фильтр режет объём сам.
-    """
+    """Каталог юрлиц по ОКВЭД-кодам через ротируемые прокси."""
     out: dict[str, DirectoryHit] = {}
     for okved in okved_codes[:2]:
         url_code = okved_to_url_code(okved)
         if not url_code:
             continue
         for page in (1, 2):
-            html = await render_html(
+            target_url = (
                 f"https://checko.ru/company/select?code={url_code}"
-                + (f"&page={page}" if page > 1 else ""),
-                wait_ms=4500,
+                + (f"&page={page}" if page > 1 else "")
             )
-            if not html:
+            status, html, _ = await fetch_checko(target_url)
+            if status != 200 or not html:
                 break
-            if "подтвердите" in html[:3000].lower() or "smartcaptcha" in html.lower():
+            if "smartcaptcha" in html[:4000].lower() or "подтвердите" in html[:3000].lower():
                 global CHECKO_BLOCKED
                 CHECKO_BLOCKED = True
-                logger.warning("checko catalog: captcha — каталог недоступен")
+                logger.warning("checko catalog: captcha — каталог временно заблокирован")
                 break
+            CHECKO_BLOCKED = False
             hits = parse_catalog(html, okved)
             if not hits:
-                break  # пустая страница = конец списка
+                break
             for h in hits:
                 if h.ogrn in out:
                     continue

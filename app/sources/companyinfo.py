@@ -358,11 +358,10 @@ async def _by_name_raw(name: str, *, city: str | None = None, min_score: int = 7
 
     # --- фолбэк: checko ---
     import html as html_mod
+    from ..proxy import fetch_checko
     async with _sem:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
-                                      headers={"User-Agent": UA}) as client:
-            html = await _fetch(client, f"{BASE}/search?query={clean}")
-    if not html:
+        status, html, _ = await fetch_checko(f"{BASE}/search?query={clean}")
+    if status != 200 or not html:
         return None
 
     # результаты: /company/<slug>-<ОГРН>
@@ -381,10 +380,8 @@ async def _by_name_raw(name: str, *, city: str | None = None, min_score: int = 7
         return None
     href, label, _score = best
     async with _sem:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
-                                      headers={"User-Agent": UA}) as client:
-            card_html = await _fetch(client, f"{BASE}{href}")
-    if not card_html:
+        status, card_html, _ = await fetch_checko(f"{BASE}{href}")
+    if status != 200 or not card_html:
         return None
     return _parse_card(card_html, url=f"{BASE}{href}")
 
@@ -417,24 +414,14 @@ async def contacts_by_ogrn(ogrn: str) -> dict:
     out: dict = {}
     card_url = f"{BASE}/search?query={ogrn}"
     async with _checko_sem:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10),
-                                          headers={"User-Agent": UA}) as client:
-                resp = await client.get(f"{BASE}/search?query={ogrn}", follow_redirects=True)
-                if resp.status_code == 429 or "подтвердите" in resp.text[:3000].lower():
-                    _CheckoState.blocked_until = _now_ts() + 30 * 60
-                    logger.warning("checko rate-limited (429/капча): блок на 30 минут")
-                    return {}
-                if resp.status_code == 200 and len(resp.text) > 2000:
-                    html = resp.text
-                    if "/company/" in str(resp.url):
-                        card_url = str(resp.url)
-                else:
-                    html = ""
-                await asyncio.sleep(0.7)   # вежливый темп
-        except httpx.HTTPError as exc:
-            logger.debug("checko ogrn fetch failed: %s", exc)
-            return {}
+        from ..proxy import fetch_checko
+        status, html, final_url = await fetch_checko(f"{BASE}/search?query={ogrn}")
+        if status == 200 and len(html) > 2000:
+            if "/company/" in final_url:
+                card_url = final_url
+        else:
+            html = ""
+        await asyncio.sleep(0.3)
     if not html:
         return {}
 
