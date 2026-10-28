@@ -764,7 +764,9 @@ async def _vet_suppliers(cards: list, query: str, emit: Emit) -> list:
 Определи, какие карточки РЕЛЕВАНТНЫ предмету закупки:
 - ДА: компания производит, поставляет или оптом продаёт искомый товар (или близкую товарную группу: плодоовощная продукция/зелень для овощей/грибов, бакалея для муки/круп, рыбопродукты для рыбы, HoReCa-поставки продуктов питания).
 - НЕТ: сайты-каталоги, агрегаторы, справочники компаний, доски объявлений (productcenter.ru, cataloxy.ru, orgpage.ru, orgs.biz, tiu.ru, pulscen, regtorg, avito, all.biz и любые каталоги/справочники со списками фирм) — они НЕ поставщики!;
-  компании ЯВНО ДРУГОЙ отрасли (птицефабрики/яйца/мясо/рыба при поиске грибов!, автовыкуп, мебель, игрушки, стройматериалы, металл), а также товарные позиции каталогов («Горбуша 800г»), декор, розничные магазины.
+  компании ЯВНО ДРУГОЙ отрасли (птицефабрики/яйца/мясо при поиске грибов!, автовыкуп, мебель, игрушки, стройматериалы, металл);
+  НЕПИЩЕВЫЕ товары и услуги (зарыбление прудов, малёк для водоёмов, аквариумистика, рыбалка, снасти, саженцы/семена для дачников, корма для животных, цветы, удобрения);
+  товарные позиции каталогов («Горбуша 800г»), декор, розничные магазины.
 
 {chr(10).join(lines)}
 
@@ -1090,21 +1092,35 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
 
         kept_geo = []
         for c in cards:
-            if c.city and not _region_ok(c.city, region_name):
-                if _delivers_here(c):
+            city_ok = bool(c.city and _region_ok(c.city, region_name) and c.city.strip("—-– "))
+            geo_local = bool(c.delivery_geo and _region_ok(c.delivery_geo, region_name) and c.delivery_geo.strip("—-– "))
+
+            geo_foreign = bool(
+                c.delivery_geo and not _region_ok(c.delivery_geo, region_name)
+                and not any(w in c.delivery_geo.lower() for w in ("рф", "росси", "снг", "все регионы", "любой регион"))
+            )
+            city_foreign = bool(c.city and not _region_ok(c.city, region_name) and c.city.strip("—-– "))
+
+            delivers = _delivers_here(c)
+
+            if city_foreign or geo_foreign:
+                if delivers:
                     c.relevance = max(0, c.relevance - 5)  # ниже местных
-                    c.sources["гео"] = (f"{c.city} — доставка в регион "
+                    origin = c.city or c.delivery_geo or "Другой регион"
+                    c.sources["гео"] = (f"{origin} — доставка в регион "
                                        f"«{region_name}» заявлена на сайте")
+                    kept_geo.append(c)
                 else:
-                    continue  # чужой город без доставки к нам — вон из выдачи
-            elif not c.city and not c.delivery_geo and not _delivers_here(c):
-                # регион не подтверждён никак (город и гео не определены,
-                # федеральной доставки нет) — не претендент на топ региона:
-                # пессимизируем, не вырезая потенциальных локалов
-                # (кейс sr-pomidor: московский «фантом» в челябинской выдаче)
-                c.relevance = max(0, c.relevance - 10)
-                c.sources["гео"] = "регион не подтверждён: город не определён"
-            kept_geo.append(c)
+                    continue  # чужой регион без подтверждённой доставки к нам — исключаем
+            elif city_ok or geo_local:
+                kept_geo.append(c)  # подтверждённый местный поставщик
+            elif delivers:
+                c.relevance = max(0, c.relevance - 5)
+                c.sources["гео"] = f"доставка в регион «{region_name}» заявлена на сайте"
+                kept_geo.append(c)
+            else:
+                # регион не подтверждён и доставки в регион нет — исключаем
+                continue
         geo_dump = [c for c in cards if c not in kept_geo]
         if geo_dump:
             db.insert_excluded(search_id, [_row(c) for c in geo_dump], "geo")
