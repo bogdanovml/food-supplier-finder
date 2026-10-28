@@ -987,9 +987,9 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             # 3. Есть подтвержденные цены на товар
             if c.price_min or c.price_note:
                 return True
-            # 4. В названии, описании или домене ЕСТЬ корень искомого товара
-            blob = f"{c.name or ''} {c.description or ''} {c.domain or ''} {c.legal_name or ''}".lower()
-            if core_stems and any(s in blob for s in core_stems):
+            # 4. В описании деятельности ЕСТЬ корень искомого товара (не в фамилиях!)
+            desc = (c.description or "").lower()
+            if core_stems and any(s in desc for s in core_stems):
                 return True
             return False
 
@@ -1000,6 +1000,32 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             stats["excluded_offtopic"] = stats.get("excluded_offtopic", 0) + len(unconfirmed)
             await emit({"type": "stage", "stage": "enrich", "status": "run",
                         "message": f"исключено неподтвержденных карточек: {len(unconfirmed)}"})
+
+        # --- 5.3 Исключение слепых карточек без подтвержденных данных о товаре:
+        # Карточка БЕЗ сайта, БЕЗ цен, БЕЗ условий поставки и БЕЗ госконтрактов 44-ФЗ
+        # для закупщика бесполезна (случайная строка из телефонной книги).
+        def _has_substance(c) -> bool:
+            if _has_real_site(c):
+                return True
+            if c.gov_contracts_count > 0:
+                return True
+            if c.price_min or (c.price_note and c.price_note.strip()):
+                return True
+            if c.delivery or c.order_terms or c.delivery_geo:
+                return True
+            if c.min_order and c.min_order.strip():
+                return True
+            if c.product_links:
+                return True
+            return False
+
+        empty_stubs = [c for c in cards if not _has_substance(c)]
+        if empty_stubs:
+            db.insert_excluded(search_id, [_row(c) for c in empty_stubs], "no_substance")
+            cards = [c for c in cards if _has_substance(c)]
+            stats["excluded_no_substance"] = len(empty_stubs)
+            await emit({"type": "stage", "stage": "enrich", "status": "run",
+                        "message": f"исключено слепых карточек без данных о товаре: {len(empty_stubs)}"})
 
         # --- 5.5 Поздний резолв: юрлицо из реквизитов сайтов + повторный
         #     отсев неактивных (ранний бренд-лукап мог и промазать/промолчать)
@@ -1110,14 +1136,15 @@ async def run_search(query: str, region_name: str, emit: Emit) -> None:
             await emit({"type": "stage", "stage": "company", "status": "run",
                         "message": f"скрыто без полных контактов: {len(no_contacts)}"})
 
-        # --- юрлицо не найдено, НО карточка полезная (контакты/цены/условия)
+        # --- юрлицо не найдено, НО карточка полезная (контакты + цены/условия/сайт)
         #     — оставляем в списке с пометкой; выбрасываем только пустышки:
         #     аноним без единого способа связаться — мусор в любом случае ---
         def _has_useful_data(c) -> bool:
             has_contact = bool(c.emails) or any(
                 len(re.sub(r"\D", "", p)) >= 10 for p in (c.phones or []))
-            return has_contact or bool(c.price_note or c.prices) \
-                or bool(c.delivery or c.order_terms or c.min_order)
+            has_commercial_info = bool(c.price_note) or bool(c.delivery or c.order_terms or c.min_order) \
+                or bool(c.gov_contracts_count > 0) or _has_real_site(c)
+            return has_contact and has_commercial_info
 
         before_no_legal = len(cards)
         no_legal = [c for c in cards

@@ -613,6 +613,7 @@ async function openDossier(row) {
       no_contacts: "Нет полных контактов",
       not_supplier: "Не поставщик (товар/декор/агрегатор) — LLM-вычитка",
       offtopic: "Чужой профиль товаров / зомби-сайт (вердикт LLM обхода)",
+      no_substance: "Слепая карточка (нет сайта, прайсов, условий и контрактов)",
     };
     const reason = reasons[row.reason] || row.reason_label || row.reason || "отсеяно";
     const body = `
@@ -1270,6 +1271,7 @@ async function switchView(view) {
             no_contacts:  ["bg-secondary", "Нет контактов"],
             not_supplier: ["bg-dark", "Не поставщик / агрегатор"],
             offtopic:     ["bg-danger", "Чужой профиль / зомби-сайт"],
+            no_substance: ["bg-secondary", "Слепая запись без данных"],
           };
           const [cls, label] = map[r] || ["bg-secondary", r];
           return `<span class="badge ${cls}">${label}</span>`;
