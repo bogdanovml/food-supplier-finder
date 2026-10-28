@@ -60,9 +60,17 @@ DOMAIN_BLACKLIST: set[str] = {
     "fishnet.ru", "fishretail.ru", "fishery.ru", "akvakultura.ru",
     "svoefermerstvo.ru", "shopprodukt.ru", "ikra.info", "ved55.ru",
     "kartoteka.ru", "banki.ru", "sravni.ru", "vc.ru", "bankcenterfinance.ru",
-    # соцсети/видео/справка
+    # соцсети/видео/справка/медиа
     "vk.com", "ok.ru", "youtube.com", "rutube.ru", "dzen.ru", "instagram.com",
-    "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru",
+    "tiktok.com", "pinterest.com", "ru.pinterest.com", "facebook.com", "twitter.com", "x.com",
+    "threads.net", "telegram.org", "t.me", "whatsapp.com", "wikipedia.org", "drom.ru",
+    # кулинарные сайты / рецепты (ни в коем случае не поставщики!)
+    "povarenok.ru", "iamcook.ru", "eda.ru", "gastronom.ru", "1000.menu", "menunedeli.ru",
+    "gotovim.ru", "koolinar.ru", "russianfood.com", "allrecipes.com", "tvoirecepty.ru",
+    "recepti.ru", "food.ru", "lifehacker.ru", "лайфхакер.рф", "vkusnoo.ru", "calorizator.ru",
+    # розничные сетевые супермаркеты (не оптовики)
+    "perekrestok.ru", "magnit.ru", "pyaterochka.ru", "lenta.com", "auchan.ru", "metro-cc.ru",
+    "globus.ru", "vkusvill.ru", "dixy.ru", "samokat.ru", "yarcheplus.ru", "svetofors.ru",
     # досье/новости
     "kommersant.ru", "rbc.ru", "vedomosti.ru", "ria.ru", "tass.ru",
 }

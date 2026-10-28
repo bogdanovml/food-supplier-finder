@@ -71,10 +71,24 @@ def parse_yandex_xml(xml_text: str, *, engine: str, query: str, top: int, start_
     return hits
 
 
+def clean_b2b_query(q: str) -> str:
+    """Добавляет минус-слова для B2B-поиска, отсекая кулинарные рецепты и поваренные книги,
+    если они не являются частью самого запроса пользователя."""
+    minus = []
+    q_low = q.lower()
+    for w in ("рецепт", "приготовить", "блюдо"):
+        if w not in q_low:
+            minus.append(f"-{w}")
+    if minus:
+        return f"{q} {' '.join(minus[:2])}"
+    return q
+
+
 async def _fetch_page(client: httpx.AsyncClient, *, engine: str, url: str, query: str,
                       lr: int, page: int) -> list[SerpHit]:
     s = get_settings()
-    params = {"user": s.xmlstock_user, "key": s.xmlstock_key, "query": query, "sortby": "rlv"}
+    b2b_q = clean_b2b_query(query)
+    params = {"user": s.xmlstock_user, "key": s.xmlstock_key, "query": b2b_q, "sortby": "rlv"}
     if "yandex" in engine:
         params["lr"] = lr
         params["maxpassages"] = 2
