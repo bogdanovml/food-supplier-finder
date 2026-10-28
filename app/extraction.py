@@ -16,6 +16,8 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from html.parser import HTMLParser
+from urllib.parse import urlparse, urljoin
 
 import httpx
 from price_parser import Price
@@ -709,292 +711,233 @@ def merge_facts(a: SiteFacts, b: SiteFacts) -> SiteFacts:
     return out
 
 
-async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFacts:
-    """Полный enrichment: httpx -> (Playwright-рендер если httpx заблокирован или SPA)
-    -> страницы контактов -> LLM (цены по предмету + опт/розница)."""
-    html = await fetch_html(url)
-    if not html:
-        # httpx заблокирован анти-ботом (кейс auchan.ru: 0 байт) — рендер браузером
-        html = await render_html(url)
-    # Если глубокая страница из выдачи дала 404/пусто — пробуем корень сайта
-    if not html and _up(url).netloc:
-        root_url = f"{_up(url).scheme or 'https'}://{_up(url).netloc}/"
-        if root_url.rstrip("/") != url.rstrip("/"):
-            html = await fetch_html(root_url)
-            if not html:
-                html = await render_html(root_url)
-    if not html:
-        return SiteFacts(url=url, method="failed")
-    full_text = _text_of(html)
-    facts = regex_facts(url, full_text)
-    facts.rendered = True
 
-    # --- JS-оболочка? видимого текста критически мало -> рендер браузером.
-    # (regex-«цены» из навигации не считаем данными: после рендера переизвлекаем)
-    if len(full_text) < THIN_TEXT_THRESHOLD:
+
+class DOMNavExtractor(HTMLParser):
+    """Извлечение всех внутренних ссылок из DOM без багов проглатывания тегов."""
+    def __init__(self, base_url: str):
+        super().__init__()
+        self.base_url = base_url
+        self.base_host = _normalize_host(urlparse(base_url).netloc)
+        self.links: list[tuple[str, str]] = []
+        self._curr_href: str | None = None
+        self._curr_text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            href = dict(attrs).get("href", "").strip()
+            if href and not href.startswith(("mailto:", "tel:", "javascript:", "data:", "#")):
+                absu = urljoin(self.base_url, href)
+                if _normalize_host(urlparse(absu).netloc) == self.base_host:
+                    self._curr_href = absu
+                    self._curr_text = []
+
+    def handle_data(self, data):
+        if self._curr_href is not None:
+            self._curr_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._curr_href is not None:
+            text = " ".join("".join(self._curr_text).split())
+            if text and len(text) < 100:
+                self.links.append((self._curr_href, text))
+            self._curr_href = None
+            self._curr_text = []
+
+
+_NAV_KEYWORD_PATTERNS = {
+    "delivery": re.compile(r"доставк|оплат|delivery|shipping|dostavka|oplata", re.I),
+    "about": re.compile(r"о нас|о компани|о предприяти|информаци|about|company|info", re.I),
+    "contacts": re.compile(r"контакт|связ|contact|kontakty|где купить|адрес", re.I),
+    "legal": re.compile(r"реквизит|requisite|rekv|документ", re.I),
+    "prices": re.compile(r"прайс|цен[ыа]|каталог|price|catalog|товары|продукц", re.I),
+}
+
+
+def extract_key_subpages(html: str, base_url: str) -> dict[str, str]:
+    """Находит в DOM навигации ключевые подстраницы: доставка, о компании, контакты, реквизиты, прайсы."""
+    parser = DOMNavExtractor(base_url)
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+
+    found: dict[str, str] = {}
+    for url, anchor in parser.links:
+        path = urlparse(url).path.lower()
+        combo = f"{anchor} {path}"
+        for cat, rx in _NAV_KEYWORD_PATTERNS.items():
+            if cat not in found and rx.search(combo):
+                if url.rstrip("/") != base_url.rstrip("/"):
+                    found[cat] = url
+    return found
+
+
+async def fetch_clean_page(url: str) -> tuple[str, str]:
+    """Скачивает страницу, а если это React/Vue SPA или пустая оболочка — рендерит браузером."""
+    html = await fetch_html(url)
+    text = _text_of(html or "")
+    if len(text) < 250 or '<div id="root">' in (html or "") or '<div id="app">' in (html or "") or '__next' in (html or ""):
         rendered = await render_html(url)
         if rendered:
             html = rendered
-            full_text = _text_of(html)
-            facts = regex_facts(url, full_text)
-            facts.rendered = True
+            text = _text_of(html)
+    return html or "", text or ""
 
-    # --- юрлицо с сайта: футер/«Реквизиты» (после рендера — на итоговом тексте) ---
-    legal = extract_legal_from_text(full_text)
+async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFacts:
+    """Комплексный анализ компании по сайту:
+    1. Читает посадочную страницу (с авто-рендером React/Vue SPA);
+    2. Извлекает из меню и футера ссылки на Доставку, О компании, Контакты;
+    3. Скачивает и рендерит эти страницы параллельно;
+    4. Извлекает контакты, телефоны, email и ИНН;
+    5. Передает комплексный текст (товар + компания + доставка) в LLM,
+       чтобы модель видела полную картину, а не обрывок товарного каталога!
+    """
+    facts = SiteFacts(url=url, method="holistic")
+
+    # 1. Посадочная страница
+    landing_html, landing_text = await fetch_clean_page(url)
+    if not landing_html:
+        root_url = f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}/"
+        if root_url.rstrip("/") != url.rstrip("/"):
+            landing_html, landing_text = await fetch_clean_page(root_url)
+
+    if not landing_html or len(landing_text) < 40:
+        facts.method = "failed"
+        return facts
+
+    facts.ok = True
+    facts.rendered = True
+
+    # 2. Поиск ключевых страниц в DOM навигации (меню, футер)
+    subpages = extract_key_subpages(landing_html, url)
+
+    # Если посадочная страница глубокая (товар), а меню там нет — проверим корень сайта
+    root_url = f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}/"
+    if ("delivery" not in subpages or "about" not in subpages) and root_url.rstrip("/") != url.rstrip("/"):
+        root_html, _ = await fetch_clean_page(root_url)
+        if root_html:
+            root_subpages = extract_key_subpages(root_html, root_url)
+            for k, v in root_subpages.items():
+                if k not in subpages:
+                    subpages[k] = v
+
+    # Фолбэк типовых путей доставки/контактов, если в меню их нет
+    if "delivery" not in subpages:
+        subpages["delivery"] = f"{root_url}delivery/"
+    if "contacts" not in subpages:
+        subpages["contacts"] = f"{root_url}contacts/"
+
+    # 3. Параллельное скачивание ключевых подстраниц (с авто-рендером SPA!)
+    fetch_tasks = {
+        cat: fetch_clean_page(u)
+        for cat, u in subpages.items()
+        if cat in ("delivery", "about", "contacts", "legal")
+    }
+    sub_texts: dict[str, str] = {}
+    if fetch_tasks:
+        res = await asyncio.gather(*fetch_tasks.values())
+        for cat, (h, t) in zip(fetch_tasks.keys(), res):
+            if len(t) >= 100:  # страница существует и содержит текст
+                sub_texts[cat] = t
+
+    # 4. Регулярки по ВСЕМ скачанным страницам (контакты, ИНН, ОГРН)
+    all_combined_text = f"{landing_text}\n" + "\n".join(sub_texts.values())
+    rg_facts = regex_facts(url, all_combined_text)
+    facts.phones = rg_facts.phones
+    facts.emails = rg_facts.emails
+    facts.certificates = rg_facts.certificates
+
+    legal = extract_legal_from_text(all_combined_text)
     facts.inn = legal.get("inn")
     facts.ogrn = legal.get("ogrn")
     facts.legal_name = legal.get("legal_name")
 
-    # ================================================================
-    # ДВЕ ПАРАЛЛЕЛЬНЫЕ ФАЗЫ (было 6-8 последовательных сетевых шагов):
-    # Фаза 1: всё, что зависит только от главной страницы, — одновременно.
-    # Фаза 2: адресные страницы (ссылки известны только после фазы 1).
-    # ================================================================
-    import asyncio as _aio
-    main_text = _main_text(html)
-    need_contacts_llm = use_llm and not (facts.emails and facts.phones)
-    need_facts_llm = use_llm and len(main_text) > 200
+    # 5. Ссылки на прайсы/каталоги
+    price_page_url = subpages.get("prices")
+    pl = extract_product_links(landing_html, query, url)
+    facts.product_links = list(dict.fromkeys(([price_page_url] if price_page_url else []) + pl))[:3]
 
-    async def _links():
+    # 6. Комплексный LLM-анализ компании
+    if use_llm:
+        about_snippet = sub_texts.get("about", sub_texts.get("legal", ""))[:3500]
+        delivery_snippet = sub_texts.get("delivery", "")[:3500]
+        contacts_snippet = sub_texts.get("contacts", "")[:1500]
+
+        prompt = f"""Товар, который ищет закупщик: "{query}".
+Ниже — сводная информация с официального сайта компании (страница товара, «О нас», «Доставка и оплата», «Контакты»):
+
+--- ПОСАДОЧНАЯ СТРАНИЦА ТОВАРА ---
+{landing_text[:3500]}
+
+--- О КОМПАНИИ / О НАС ---
+{about_snippet or "—"}
+
+--- ДОСТАВКА И ОПЛАТА ---
+{delivery_snippet or "—"}
+
+--- КОНТАКТЫ И РЕКВИЗИТЫ ---
+{contacts_snippet or "—"}
+
+Проанализируй сайт КОМПЛЕКСНО и ответь СТРОГО JSON:
+{{
+  "match": "profile|adjacent|offtopic",
+  "reasoning": "краткое объяснение решения (1 предложение)",
+  "kind": "производитель|дистрибьютор|магазин|неясно",
+  "wholesale": true/false,
+  "description": "1-2 предложения, чем реально занимается компания",
+  "company_city": "в каком городе/регионе находится офис/склад/производство компании (НЕ город покупателя!); null если не указан",
+  "delivery_geo": "куда доставляют («Москва и МО», «вся РФ», «Новосибирск и пригород» и т.п.)",
+  "delivery": "условия доставки (порог бесплатности, стоимость, сроки, самовывоз, оплата)",
+  "prices": ["цены ТОЛЬКО на {query}"],
+  "min_order": "мин. заказ если указан",
+  "inn": "ИНН если указан в реквизитах, иначе null",
+  "legal_name": "ООО/ИП/АО если указано в реквизитах, иначе null",
+  "phones": ["телефоны если есть"],
+  "emails": ["email если есть"]
+}}"""
+
         try:
-            return await classify_site_links(html, url)
-        except Exception:
-            return {k: [] for k in ("prices", "contacts", "legal", "delivery")}
+            data = await ask_json(prompt, smart=True, temperature=0.1)
+            if isinstance(data, dict):
+                match = str(data.get("match") or "").strip().lower()
+                facts.match = match if match in ("profile", "adjacent", "offtopic") else "offtopic"
+                facts.irrelevant = (facts.match == "offtopic")
+                facts.kind = (data.get("kind") or "неясно")[:20]
+                facts.wholesale = bool(data.get("wholesale")) if "wholesale" in data else None
+                if data.get("description"):
+                    facts.description = str(data["description"])[:300]
+                if data.get("company_city"):
+                    facts.city = str(data["company_city"]).strip()[:40]
+                if data.get("delivery_geo"):
+                    facts.delivery_geo = str(data["delivery_geo"]).strip()[:50]
+                if data.get("delivery"):
+                    facts.delivery = str(data["delivery"]).strip()[:240]
+                if data.get("min_order"):
+                    facts.min_order = str(data["min_order"]).strip()[:80]
+                if data.get("prices"):
+                    facts.prices = _polish_prices([str(p) for p in data["prices"][:4]])
+                if data.get("inn") and not facts.inn:
+                    facts.inn = re.sub(r"\D", "", str(data["inn"]))[:12]
+                if data.get("legal_name") and not facts.legal_name:
+                    facts.legal_name = str(data["legal_name"]).strip()[:80]
+                for p in (data.get("phones") or []):
+                    cp = _clean_phone(str(p))
+                    if cp and cp not in facts.phones:
+                        facts.phones.append(cp)
+                for e in (data.get("emails") or []):
+                    se = str(e).lower().strip()
+                    if se and se not in facts.emails:
+                        facts.emails.append(se)
+        except Exception as exc:
+            logger.warning("Holistic LLM analysis failed for %s: %s", url, exc)
 
-    async def _contacts_main():
-        if not need_contacts_llm:
-            return None
-        return await llm_contacts(url, contact_text(full_text))
-
-    async def _facts_main():
-        if not need_facts_llm:
-            return None
-        return await llm_facts(url, main_text, query)
-
-    async def _delivery_main():
-        # выжимка доставки с главной: адресная страница (фаза 2) может
-        # дать лучше — тогда перекроет
-        if not use_llm or len(full_text) < 400:
-            return (None, None, None)
-        try:
-            return await llm_delivery(url, main_text)
-        except Exception:
-            return (None, None, None)
-
-    link_cats, contact_facts, llm, delivery_main = await _aio.gather(
-        _links(), _contacts_main(), _facts_main(), _delivery_main())
-
-    # --- слияние фазы 1 ---
-    if contact_facts and contact_facts.ok:
-        for ph in contact_facts.phones:
-            cleaned = _clean_phone(ph)
-            if cleaned and cleaned not in facts.phones:
-                facts.phones.append(cleaned)
-        for e in contact_facts.emails:
-            if e not in facts.emails:
-                facts.emails.append(e)
-        if contact_facts.city:
-            facts.city = contact_facts.city
-        facts.ok = True
-    if llm and llm.ok:
-        facts = merge_facts(facts, llm)
-        if llm.prices:
-            facts.prices = _polish_prices(llm.prices)
-    # ссылки прайсов для колонки «Прайс-листы»: классифицированные страницы цен
-    # (sitemap/якоря) + релевантные запросу разделы
-    facts.product_links = list(dict.fromkeys(
-        (link_cats["prices"] or [])[:2] + extract_product_links(html, query, url)))[:3]
-    if delivery_main:
-        summary, dcity, dgeo = delivery_main
-        if summary and (not facts.delivery or len(facts.delivery) < 150):
-            facts.delivery = summary
-        if dgeo and not facts.delivery_geo:
-            facts.delivery_geo = dgeo
-        # город из текста доставки: «Доставка по Перми и краю» при поиске
-        # по Москве — чужой город. Собственный сайт сильнее каталога/сниппета
-        if dcity:
-            facts.city = dcity
-    # --- Фаза 2: адресные страницы, все ветки параллельно ---
-    async def _contact_pages():
-        if facts.emails:
-            return []
-        contact_pages = link_cats["contacts"][:2]
-        probe_urls = contact_pages or [url.rstrip("/") + "/" + sfx for sfx in
-                                        ("kontakty", "contacts", "dostavka")]
-
-        async def _cpage(c_url: str, is_probe: bool) -> SiteFacts:
-            contact_html = await fetch_html(c_url)
-            cpage_text = _text_of(contact_html) if contact_html else ""
-            # рендер — только для первичной пробы /kontakty (антиспам-сайты:
-            # каждый рендер 5-10с, шесть проб = минута на сайт)
-            if len(cpage_text) < 200 and is_probe and "kontakty" in c_url:
-                contact_html = await render_html(c_url) or contact_html
-                cpage_text = _text_of(contact_html)
-            cf = regex_facts(c_url, cpage_text)
-            # контакт-страница идёт и гемме — regex не тащит из
-            # контакт-окон/скрытых блоков (кейс АВИСТРОН)
-            if use_llm and (cf.emails or cf.phones or len(cpage_text) > 400):
-                lcf = await llm_contacts(c_url, contact_text(cpage_text))
-                if lcf and lcf.ok:
-                    for ph in lcf.phones:
-                        cleaned = _clean_phone(ph)
-                        if cleaned and cleaned not in cf.phones:
-                            cf.phones.append(cleaned)
-                    for e in lcf.emails:
-                        if e not in cf.emails:
-                            cf.emails.append(e)
-                    if lcf.city and not cf.city:
-                        cf.city = lcf.city
-                    cf.ok = True
-            return cf
-
-        return await _aio.gather(*(_cpage(u, u not in contact_pages)
-                                    for u in probe_urls))
-
-    async def _legal_page():
-        if facts.inn or not link_cats["legal"]:
-            return None
-        try:
-            ltext = _text_of(await fetch_html(link_cats["legal"][0]) or "")
-            return extract_legal_from_text(ltext)
-        except Exception:
-            return None
-
-    async def _delivery_page():
-        if not use_llm:
-            return None
-        # Адресные страницы доставки из классификатора ссылок или типовые пути
-        candidates = list(link_cats.get("delivery") or [])
-        if not candidates:
-            root = f"{_up(url).scheme or 'https'}://{_up(url).netloc}"
-            candidates = [f"{root}/delivery/", f"{root}/dostavka/", f"{root}/dostavka-i-oplata/"]
-        for durl in candidates[:3]:
-            try:
-                dtext = _text_of(await fetch_html(durl) or "")
-                if len(dtext) < 120:
-                    continue
-                df = regex_facts(url, dtext)
-                summary, dcity, dgeo = await llm_delivery(url, dtext)
-                if summary or dcity or dgeo:
-                    return (df, summary, dcity, dgeo)
-            except Exception:
-                continue
-        return (None, None, None, None)
-
-    async def _root_legal():
-        # SERP ведёт на глубокую страницу (/zelen/ukrop.html), а юрлицо
-        # чаще на главной («ООО "Фрутомания" реализует...») — frutomania.ru
-        if facts.inn or facts.legal_name:
-            return None
-        try:
-            root = f"{_up(url).scheme or 'https'}://{_up(url).netloc}/"
-            if root.rstrip("/") == url.rstrip("/"):
-                return None  # мы и есть главная
-            rhtml = await fetch_html(root)
-            rtext = _text_of(rhtml) if rhtml else ""
-            if len(rtext) < 100:
-                return None
-            return extract_legal_from_text(rtext)
-        except Exception:
-            return None
-
-    async def _price_pages():
-        # дефицит цен на главной -> прайс-страницы: классифицированные
-        # («Витрина», «Продукция») + релевантные запросу разделы
-        targets = list(dict.fromkeys((link_cats["prices"] or [])[:1]
-                                      + facts.product_links[:2]))[:2]
-        if not use_llm or facts.prices or not targets:
-            return None
-        found = []
-        for pl in targets:
-            try:
-                sub_html = await fetch_html(pl)
-                if not sub_html:
-                    continue
-                sub_text = _main_text(sub_html)
-                if len(sub_text) < 200:
-                    continue
-                sub = await llm_facts(pl, sub_text, query)
-                if sub.prices:
-                    found = sub.prices
-                    break
-                for ph in sub.phones:
-                    if _clean_phone(ph) and _clean_phone(ph) not in facts.phones:
-                        facts.phones.append(_clean_phone(ph))
-                for e in sub.emails:
-                    if e not in facts.emails:
-                        facts.emails.append(e)
-                if sub.city and not facts.city:
-                    facts.city = sub.city
-            except Exception:
-                continue
-        return found or None
-
-    cf_list, legal2, delivery_page, price_found, root_legal = await _aio.gather(
-        _contact_pages(), _legal_page(), _delivery_page(), _price_pages(),
-        _root_legal())
-
-    # --- слияние фазы 2 ---
-    for cf in cf_list or []:
-        for e in cf.emails:
-            if e not in facts.emails:
-                facts.emails.append(e)
-        for ph in cf.phones:
-            if ph not in facts.phones:
-                facts.phones.append(ph)
-        if cf.order_terms and not facts.order_terms:
-            facts.order_terms = cf.order_terms
-        if cf.delivery and not facts.delivery:
-            facts.delivery = cf.delivery
-        if cf.city and not facts.city:
-            facts.city = cf.city
-    if facts.emails or facts.phones:
-        facts.ok = True
-
-    if legal2 and legal2.get("inn"):
-        facts.inn = legal2["inn"]
-        if not facts.ogrn and legal2.get("ogrn"):
-            facts.ogrn = legal2["ogrn"]
-        if not facts.legal_name and legal2.get("legal_name"):
-            facts.legal_name = legal2["legal_name"]
-    # юрлицо с главной (глубокая SERP-страница могла его не содержать)
-    if root_legal:
-        if not facts.inn and root_legal.get("inn"):
-            facts.inn = root_legal["inn"]
-        if not facts.ogrn and root_legal.get("ogrn"):
-            facts.ogrn = root_legal["ogrn"]
-        if not facts.legal_name and root_legal.get("legal_name"):
-            facts.legal_name = root_legal["legal_name"]
-
-    if delivery_page:
-        df, summary, dcity, dgeo = delivery_page
-        if df:
-            if df.order_terms and not facts.order_terms:
-                facts.order_terms = df.order_terms
-            if df.min_order and not facts.min_order:
-                facts.min_order = df.min_order
-        if summary:
-            facts.delivery = summary
-            facts.ok = True
-        if dgeo:
-            facts.delivery_geo = dgeo
-        if dcity:
-            facts.city = dcity
-
-    if price_found:
-        facts.prices = price_found
-        facts.method = "llm+price-page"
-
-    # город по коду стационарного телефона — надёжнее каталога (кейс
-    # «Русская Рыба»: каталог дал Москву, телефоны +7 (342) Пермь)
+    # Город по коду стационарного телефона (резерв)
     if not facts.city and facts.phones:
         facts.city = _city_from_phone(facts.phones[0]) or facts.city
 
-    # финальная полировка: мусор «0 ₽» из regex-навигации не показываем
     facts.prices = _polish_prices(facts.prices)
     return facts
-
-
 
 
 def _polish_prices(raw: list[str]) -> list[str]:
