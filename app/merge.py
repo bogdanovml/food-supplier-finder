@@ -68,9 +68,6 @@ DOMAIN_BLACKLIST: set[str] = {
     "povarenok.ru", "iamcook.ru", "eda.ru", "gastronom.ru", "1000.menu", "menunedeli.ru",
     "gotovim.ru", "koolinar.ru", "russianfood.com", "allrecipes.com", "tvoirecepty.ru",
     "recepti.ru", "food.ru", "lifehacker.ru", "лайфхакер.рф", "vkusnoo.ru", "calorizator.ru",
-    # розничные сетевые супермаркеты (не оптовики)
-    "perekrestok.ru", "magnit.ru", "pyaterochka.ru", "lenta.com", "auchan.ru", "metro-cc.ru",
-    "globus.ru", "vkusvill.ru", "dixy.ru", "samokat.ru", "yarcheplus.ru", "svetofors.ru",
     # досье/новости
     "kommersant.ru", "rbc.ru", "vedomosti.ru", "ria.ru", "tass.ru",
 }

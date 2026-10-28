@@ -302,15 +302,26 @@ _TR = {"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "
        "э": "e", "ю": "yu", "я": "ya"}
 
 
+_BRAND_ALIASES: dict[str, str] = {
+    "auchan": "ашан",
+    "magnit": "тандер",
+    "metro-cc": "метро",
+    "x5": "перекресток",
+}
+
+
 def _brand_matches(brand: str, legal_name: str) -> bool:
     """Бренд-матч валиден, если бренд точно совпадает с сегментом транслита
     (morfish == morfish) либо почти равен сегменту (fuzzy>=85 — defagroup/ДЕФАГРУПП=89).
     Произвольные подстроки для коротких брендов ЗАПРЕЩЕНЫ: иначе 'orgs' ложно
     матчится в 'orgsintez' (ООО «Группа Оргсинтез»!), 'opt23' в 'optimum23'."""
     from rapidfuzz import fuzz
+    b = brand.lower().strip()
+    if b in _BRAND_ALIASES:
+        if _BRAND_ALIASES[b] in legal_name.lower():
+            return True
     translit = "".join(_TR.get(ch, ch) for ch in legal_name.lower())
     translit = re.sub(r"[^a-z0-9]", " ", translit)
-    b = brand.lower().strip()
     if len(b) < 3:
         return False
     for seg in translit.split():
@@ -368,7 +379,7 @@ async def _resolve_legal(cards: list, emit: Emit, limit: int = 30) -> None:
                     # Валидация обязательна: короткий бренд находит тёзок
                     # (кейс opt23.ru -> чужое ООО «ОПТИМУМ 23», ликвидировано!)
                     if c.domain:
-                        brand = c.domain.split(".")[0]
+                        brand = c.domain.split(".")[0].removesuffix("-cc").removesuffix("-opt")
                         info = await companyinfo_src.by_name(brand, trust_first=True)
                         if info and not _brand_matches(brand, info.legal_name or ""):
                             info = None  # тёзка, не наша компания
