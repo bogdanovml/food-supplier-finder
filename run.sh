@@ -8,7 +8,14 @@ if [ ! -d ".venv" ]; then
   echo "Создание виртуального окружения Python..."
   python3 -m venv .venv
   .venv/bin/pip install --upgrade pip
-  .venv/bin/pip install -r requirements.txt
+  if [ -f "requirements.txt" ]; then
+    .venv/bin/pip install -r requirements.txt
+  else
+    .venv/bin/pip install "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx[http2]>=0.28" "h2>=4.1.0" \
+      "pydantic-settings>=2.6" "sse-starlette>=2.1" "jinja2>=3.1" "trafilatura>=1.12" \
+      "price-parser>=0.4" "rapidfuzz>=3.0" "tldextract>=5.1" "playwright>=1.40" \
+      "xlsxwriter>=3.2" "aiosmtplib>=3.0" "email-validator>=2.2"
+  fi
   .venv/bin/python -m playwright install chromium
 fi
 

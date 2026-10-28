@@ -20,6 +20,7 @@ exports/
 
 # Internal docs / notes
 docs/
+requirements.txt
 
 # OS / editor
 .DS_Store
