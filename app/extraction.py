@@ -941,14 +941,23 @@ async def enrich_site(url: str, query: str, *, use_llm: bool = True) -> SiteFact
 
 
 def _polish_prices(raw: list[str]) -> list[str]:
-    """Косметика LLM-цен: «140 0 ₽ За» -> «140,00 ₽», пустые «0 руб» — вон."""
+    """Косметика LLM-цен: «140 0 ₽ За» -> «140,00 ₽», нулевые цены («0 руб./кг», «0 ₽») — вон."""
     out = []
     for s in raw or []:
-        s = re.sub(r"\s+(за|шт|кг|упак)\b.*$", "", (s or "").strip(), flags=re.I)
+        s = re.sub(r"\s+(за|шт|упак)\b.*$", "", (s or "").strip(), flags=re.I)
         m = re.match(r"^(\d[\d\s]*)\s(\d)\s*₽$", s)
         if m:
             s = f"{m.group(1).strip()},{m.group(2)}0 ₽"
-        if s and not re.match(r"^0[\s\u00a0]*(руб|₽)", s) and s not in out:
+        # Проверка на ноль (0 руб, 0.00 руб, 0 руб./кг)
+        clean_num = re.sub(r"[^\d.]", "", s.replace(",", "."))
+        try:
+            if float(clean_num) <= 0:
+                continue
+        except (ValueError, TypeError):
+            pass
+        if re.match(r"^0[\s\u00a0]*(руб|₽|\.0)", s, re.I):
+            continue
+        if s and s not in out:
             out.append(s)
         if len(out) >= 4:
             break
